@@ -12,7 +12,7 @@ import inspect
 import json
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from typing import TYPE_CHECKING, Annotated, Any, Literal, Optional, TypedDict, cast
+from typing import TYPE_CHECKING, Annotated, Any, Literal, NoReturn, Optional, TypedDict, cast
 
 from langchain_core.messages import (
     AIMessage,
@@ -33,7 +33,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent_runtime.content_blocks import extract_text_content
 from app.agent_runtime.attachments import build_image_content_blocks
-from app.agent_runtime.types import ReactAgentConfig
+from app.agent_runtime.types import (
+    MAX_CONSECUTIVE_IDENTICAL_TOOL_FAILURES,
+    ReactAgentConfig,
+)
 from app.agent_runtime.context import build_context, build_context_parts
 from app.agent_runtime.context.processors.filter import (
     filter_tool_result_metadata_content,
@@ -85,6 +88,21 @@ class ReactState(TypedDict):
 # ---------------------------------------------------------------------------
 
 
+# Transient upstream failures that should be retried inside the llm_call node
+# instead of failing the whole subagent turn (which forces the primary agent to
+# re-dispatch and burn far more tokens).
+_EMPTY_GENERATION_MARKERS = (
+    "No generation chunks were returned",
+    "LLM流式调用未返回响应",
+    "empty LLM response without tool calls",
+)
+
+# Keep a few attempts: upstream free/unstable providers often recover on retry.
+LLM_RETRY_MAX_ATTEMPTS = 5
+LLM_RETRY_INITIAL_INTERVAL_S = 1.0
+LLM_RETRY_BACKOFF_FACTOR = 2.0
+
+
 async def _invoke_model(model: Any, messages: list[BaseMessage]) -> AIMessage:
     """Stream the LLM response and normalize it for checkpoint persistence."""
     start_time = time.perf_counter()
@@ -114,10 +132,103 @@ async def _invoke_model(model: Any, messages: list[BaseMessage]) -> AIMessage:
 
 RetryEventSink = Callable[[dict[str, Any]], Awaitable[None]]
 
+
+def _is_empty_generation_error(exc: BaseException) -> bool:
+    if not isinstance(exc, ValueError):
+        return False
+    message = str(exc)
+    return any(marker in message for marker in _EMPTY_GENERATION_MARKERS)
+
+
+def llm_should_retry_on(exc: Exception) -> bool:
+    """Return True for transient LLM/upstream failures worth retrying.
+
+    LangGraph's default_retry_on explicitly skips ValueError / TimeoutError /
+    OSError. That drops the two failure modes we see most on unstable
+    OpenAI-compatible upstreams:
+
+    - ``ValueError("No generation chunks were returned")`` (empty stream)
+    - ``StreamChunkTimeoutError`` (TimeoutError subclass; content stall)
+
+    Empty assistant turns are converted to a ValueError in ``llm_call`` so they
+    also hit this path, keeping the subagent alive instead of bubbling up to the
+    primary agent for a full re-dispatch.
+    """
+    if _is_empty_generation_error(exc):
+        return True
+
+    # Non-empty ValueError is usually validation / contract failure — do not retry.
+    # (Empty-generation ValueErrors are handled above.)
+    if isinstance(exc, ValueError):
+        return False
+
+    # StreamChunkTimeoutError subclasses TimeoutError (and OSError).
+    if isinstance(exc, TimeoutError):
+        return True
+
+    try:
+        import httpx
+    except ImportError:  # pragma: no cover
+        httpx = None  # type: ignore[assignment]
+
+    if httpx is not None:
+        if isinstance(exc, httpx.TimeoutException):
+            return True
+        if isinstance(exc, httpx.TransportError):
+            return True
+        if isinstance(exc, httpx.HTTPStatusError):
+            code = exc.response.status_code
+            return code == 429 or 500 <= code < 600
+
+    try:
+        import requests
+    except ImportError:  # pragma: no cover
+        requests = None  # type: ignore[assignment]
+
+    if requests is not None and isinstance(exc, requests.HTTPError):
+        if exc.response is None:
+            return True
+        code = exc.response.status_code
+        return code == 429 or 500 <= code < 600
+
+    status_code = _error_status_code(exc)
+    if status_code is not None:
+        if status_code in {400, 401, 403, 404, 422}:
+            return False
+        if status_code == 429 or status_code >= 500:
+            return True
+
+    if isinstance(exc, ConnectionError):
+        return True
+
+    # Programming / deterministic errors — do not retry.
+    if isinstance(
+        exc,
+        (
+            TypeError,
+            ArithmeticError,
+            ImportError,
+            LookupError,
+            NameError,
+            SyntaxError,
+            RuntimeError,
+            ReferenceError,
+            StopIteration,
+            StopAsyncIteration,
+            OSError,
+        ),
+    ):
+        return False
+
+    # Unknown Exception subclasses (provider SDKs, etc.) — retry.
+    return True
+
+
 LLM_RETRY_POLICY = RetryPolicy(
-    max_attempts=5,
-    initial_interval=1.0,
-    backoff_factor=2.0,
+    max_attempts=LLM_RETRY_MAX_ATTEMPTS,
+    initial_interval=LLM_RETRY_INITIAL_INTERVAL_S,
+    backoff_factor=LLM_RETRY_BACKOFF_FACTOR,
+    retry_on=llm_should_retry_on,
 )
 
 
@@ -242,6 +353,60 @@ def _tool_result_payload(value: Any) -> tuple[dict[str, Any], bool]:
         payload = dict(value)
         return payload, "error" not in payload
     return {"output": value}, True
+
+
+def _tool_message_indicates_failure(message: BaseMessage) -> bool:
+    """Return True when a ToolMessage payload represents a failed tool call."""
+    if not isinstance(message, ToolMessage):
+        return False
+    content = message.content
+    if not isinstance(content, str) or not content:
+        return False
+    if content.startswith("Error:"):
+        return True
+    if content.startswith("[中断]"):
+        return True
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(parsed, dict) and bool(parsed.get("error"))
+
+
+def _consecutive_identical_tool_failures(
+    messages: Sequence[BaseMessage],
+    *,
+    tool_name: str,
+    limit: int = MAX_CONSECUTIVE_IDENTICAL_TOOL_FAILURES,
+) -> int:
+    """Count trailing failed ToolMessages for ``tool_name`` (skipping AI turns)."""
+    count = 0
+    for message in reversed(list(messages)):
+        if isinstance(message, AIMessage):
+            # Keep scanning through pure tool-call AI messages for this tool.
+            tool_calls = getattr(message, "tool_calls", None) or []
+            if tool_calls and all(
+                (
+                    tc.get("name")
+                    if isinstance(tc, dict)
+                    else getattr(tc, "name", None)
+                )
+                == tool_name
+                for tc in tool_calls
+            ):
+                continue
+            break
+        if not isinstance(message, ToolMessage):
+            continue
+        name = getattr(message, "name", None) or ""
+        if name != tool_name:
+            break
+        if not _tool_message_indicates_failure(message):
+            break
+        count += 1
+        if count >= limit:
+            break
+    return count
 
 
 async def _maybe_await(value: Any) -> Any:
@@ -789,30 +954,36 @@ def create_react_agent(
 
         audit = await _start_audit(configurable, messages)
         active_audit = audit
-        try:
-            response = await _invoke_model(bound_model or model, messages)
-        except Exception as exc:
+        session_id = (
+            runtime_state.get("session_id")
+            if isinstance(runtime_state, Mapping)
+            else None
+        )
+        session_id_str = session_id if isinstance(session_id, str) else None
+
+        async def _raise_for_retry(exc: Exception) -> NoReturn:
             if audit is not None:
                 _record_audit_error(audit, exc)
                 await _finish_active_audit(status="error")
-            session_id = (
-                runtime_state.get("session_id")
-                if isinstance(runtime_state, Mapping)
-                else None
-            )
             current_attempt = _get_node_attempt(config)
             if current_attempt < LLM_RETRY_POLICY.max_attempts and _should_retry_on(
                 LLM_RETRY_POLICY, exc
             ):
                 await _emit_retry_event(
                     config,
-                    session_id=session_id if isinstance(session_id, str) else None,
+                    session_id=session_id_str,
                     node=react_config.name,
                     attempt=current_attempt + 1,
                     max_attempts=LLM_RETRY_POLICY.max_attempts,
                     exc=exc,
                 )
-            raise
+            raise exc
+
+        try:
+            response = await _invoke_model(bound_model or model, messages)
+        except Exception as exc:
+            await _raise_for_retry(exc)
+            raise  # pragma: no cover — _raise_for_retry always raises
 
         recovered_tool_calls = cast(
             list[ToolCall],
@@ -825,6 +996,16 @@ def create_react_agent(
             getattr(response, "invalid_tool_calls", None), list
         ):
             response.tool_calls = recovered_tool_calls
+
+        # Treat a fully empty assistant turn (no text, no tool calls) as a
+        # transient upstream failure so LangGraph retries the llm_call node
+        # instead of ending the subagent turn with
+        # "subagent turn completed without assistant content".
+        text_content = extract_text_content(response.content).strip()
+        if not text_content and not recovered_tool_calls:
+            await _raise_for_retry(
+                ValueError("empty LLM response without tool calls")
+            )
 
         if audit is not None:
             audit.record_response(
@@ -903,12 +1084,17 @@ def create_react_agent(
             if tool_instance:
                 result = await _invoke_tool(tool_instance, tool_args, tc, config)
                 tool_result_payload, tool_success = _tool_result_payload(result)
-                message = ToolMessage(content=str(result), tool_call_id=tool_id)
+                message = ToolMessage(
+                    content=str(result),
+                    tool_call_id=tool_id,
+                    name=tool_name,
+                )
             else:
                 tool_result_payload = {"error": f"tool '{tool_name}' not found."}
                 message = ToolMessage(
                     content=f"Error: tool '{tool_name}' not found.",
                     tool_call_id=tool_id,
+                    name=tool_name,
                 )
             return {
                 "tool_name": tool_name,
@@ -990,6 +1176,46 @@ def create_react_agent(
                         if isinstance(interrupt_value, dict):
                             interrupt_value["tool_result_previews"] = previews
                 raise
+
+            # Break edit/read-retry death spirals: same tool failing repeatedly.
+            latest = new_messages[-1] if new_messages else None
+            if (
+                isinstance(latest, ToolMessage)
+                and _tool_message_indicates_failure(latest)
+            ):
+                failed_name = getattr(latest, "name", None) or tool_calls[cursor]["name"]
+                streak = _consecutive_identical_tool_failures(
+                    [*state.get("messages", []), *new_messages],
+                    tool_name=failed_name,
+                )
+                if streak >= MAX_CONSECUTIVE_IDENTICAL_TOOL_FAILURES:
+                    breaker = (
+                        f"工具 `{failed_name}` 已连续失败 {streak} 次，停止本轮自动重试。"
+                        "请换策略（例如去掉行号前缀、改用 write/create、缩小替换片段）"
+                        "或向用户说明阻塞后结束，不要再次调用同一工具。"
+                    )
+                    new_messages.append(
+                        HumanMessage(
+                            content=breaker,
+                            additional_kwargs={"part": "runtime"},
+                        )
+                    )
+                    # Force end of turn after the remaining tool_calls in this
+                    # batch are skipped by jumping cursor to the end and
+                    # marking done under no_tool_call semantics via is_done.
+                    update = {
+                        "messages": new_messages,
+                        "tool_call_cursor": len(tool_calls),
+                        "is_done": True,
+                        "final_output": {
+                            "error": "consecutive_tool_failures",
+                            "tool_name": failed_name,
+                            "failures": streak,
+                        },
+                    }
+                    await _finish_active_audit()
+                    audit_finished = True
+                    return update
 
             update: dict[str, Any] = {
                 "messages": new_messages,

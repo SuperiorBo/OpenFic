@@ -15,6 +15,7 @@ from app.agent_runtime.graph.react_agent import (
     _invoke_model,
     _invoke_tool,
     create_react_agent,
+    llm_should_retry_on,
     ReactState,
 )
 
@@ -238,6 +239,25 @@ async def test_react_agent_terminates_on_tool_success():
         assert result["final_output"] == {"result": "analysis complete"}
 
 
+def test_llm_should_retry_on_covers_empty_stream_and_timeout_failures() -> None:
+    """Unstable OpenAI-compatible upstreams fail as ValueError / TimeoutError.
+
+    LangGraph's default_retry_on skips both; we must retry them so subagents
+    recover in-place instead of bubbling failure to the primary agent.
+    """
+    assert llm_should_retry_on(ValueError("No generation chunks were returned"))
+    assert llm_should_retry_on(ValueError("LLM流式调用未返回响应"))
+    assert llm_should_retry_on(ValueError("empty LLM response without tool calls"))
+    assert llm_should_retry_on(TimeoutError("stream stalled"))
+    assert llm_should_retry_on(ConnectionError("peer reset"))
+    assert llm_should_retry_on(Exception("temporary upstream failure"))
+
+    # Deterministic / programming errors must NOT retry.
+    assert not llm_should_retry_on(TypeError("bad arg"))
+    assert not llm_should_retry_on(RuntimeError("tool runtime failure"))
+    assert not llm_should_retry_on(ValueError("unrelated validation error"))
+
+
 @pytest.mark.asyncio
 async def test_react_agent_emits_retry_event_for_retryable_llm_failure():
     config = ReactAgentConfig(
@@ -291,6 +311,207 @@ async def test_react_agent_emits_retry_event_for_retryable_llm_failure():
             "error_message": "temporary upstream failure",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_react_agent_retries_empty_generation_chunks_error():
+    """Empty upstream stream used to fail the subagent turn immediately."""
+    config = ReactAgentConfig(
+        name="writer",
+        tools=[],
+        termination=TerminationCondition(mode="no_tool_call"),
+    )
+    graph = create_react_agent(config)
+    retry_events: list[dict] = []
+
+    async def _retry_event_sink(payload: dict) -> None:
+        retry_events.append(payload)
+
+    responses = [
+        ValueError("No generation chunks were returned"),
+        AIMessage(content="recovered after empty stream"),
+    ]
+
+    async def _mock_invoke(*args, **kwargs):
+        result = responses.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    with patch(
+        "app.agent_runtime.graph.react_agent._invoke_model", side_effect=_mock_invoke
+    ):
+        result = await graph.ainvoke(
+            {
+                "messages": [HumanMessage(content="Hello")],
+                "iteration_count": 0,
+                "is_done": False,
+                "final_output": None,
+            },
+            config={
+                "configurable": {
+                    "runtime_state": {"session_id": "sess_empty_chunks"},
+                    "retry_event_sink": _retry_event_sink,
+                },
+            },
+        )
+
+    assert result["is_done"] is True
+    assert result["messages"][-1].content == "recovered after empty stream"
+    assert len(retry_events) == 1
+    assert retry_events[0]["error_type"] == "ValueError"
+    assert "No generation chunks were returned" in retry_events[0]["error_message"]
+
+
+@pytest.mark.asyncio
+async def test_react_agent_retries_stream_chunk_timeout():
+    config = ReactAgentConfig(
+        name="writer",
+        tools=[],
+        termination=TerminationCondition(mode="no_tool_call"),
+    )
+    graph = create_react_agent(config)
+    retry_events: list[dict] = []
+
+    async def _retry_event_sink(payload: dict) -> None:
+        retry_events.append(payload)
+
+    responses = [
+        TimeoutError(
+            "No streaming chunk received for 120.0s (model=grok-4.5, chunks_received=21)."
+        ),
+        AIMessage(content="recovered after stall"),
+    ]
+
+    async def _mock_invoke(*args, **kwargs):
+        result = responses.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    with patch(
+        "app.agent_runtime.graph.react_agent._invoke_model", side_effect=_mock_invoke
+    ):
+        result = await graph.ainvoke(
+            {
+                "messages": [HumanMessage(content="Hello")],
+                "iteration_count": 0,
+                "is_done": False,
+                "final_output": None,
+            },
+            config={
+                "configurable": {
+                    "runtime_state": {"session_id": "sess_timeout"},
+                    "retry_event_sink": _retry_event_sink,
+                },
+            },
+        )
+
+    assert result["is_done"] is True
+    assert result["messages"][-1].content == "recovered after stall"
+    assert len(retry_events) == 1
+    assert retry_events[0]["error_type"] == "TimeoutError"
+
+
+@pytest.mark.asyncio
+async def test_react_agent_retries_empty_assistant_content_without_tool_calls():
+    """Empty AIMessage used to end the turn with 'without assistant content'."""
+    config = ReactAgentConfig(
+        name="writer",
+        tools=[],
+        termination=TerminationCondition(mode="no_tool_call"),
+    )
+    graph = create_react_agent(config)
+    retry_events: list[dict] = []
+
+    async def _retry_event_sink(payload: dict) -> None:
+        retry_events.append(payload)
+
+    responses = [
+        AIMessage(content=""),  # empty — should retry
+        AIMessage(content="  "),  # whitespace only — should retry
+        AIMessage(content="filled after empty turns"),
+    ]
+
+    async def _mock_invoke(*args, **kwargs):
+        return responses.pop(0)
+
+    with patch(
+        "app.agent_runtime.graph.react_agent._invoke_model", side_effect=_mock_invoke
+    ):
+        result = await graph.ainvoke(
+            {
+                "messages": [HumanMessage(content="Hello")],
+                "iteration_count": 0,
+                "is_done": False,
+                "final_output": None,
+            },
+            config={
+                "configurable": {
+                    "runtime_state": {"session_id": "sess_empty_content"},
+                    "retry_event_sink": _retry_event_sink,
+                },
+            },
+        )
+
+    assert result["is_done"] is True
+    assert result["messages"][-1].content == "filled after empty turns"
+    assert len(retry_events) == 2
+    assert all(
+        "empty LLM response without tool calls" in e["error_message"]
+        for e in retry_events
+    )
+
+
+@pytest.mark.asyncio
+async def test_react_agent_does_not_retry_empty_content_when_tool_calls_present():
+    """Tool-call-only turns are valid and must not be treated as empty failures."""
+    executed: list[str] = []
+
+    async def _async_noop() -> str:
+        executed.append("called")
+        return "ok"
+
+    tool = StructuredTool.from_function(
+        coroutine=_async_noop,
+        name="touch",
+        description="touch",
+    )
+    config = ReactAgentConfig(
+        name="writer",
+        tools=[tool],
+        termination=TerminationCondition(mode="no_tool_call"),
+        max_iterations=2,
+    )
+    graph = create_react_agent(config)
+    call_count = 0
+
+    async def _mock_invoke(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return AIMessage(
+                content="",
+                tool_calls=[{"id": "call_1", "name": "touch", "args": {}}],
+            )
+        return AIMessage(content="done after tool")
+
+    with patch(
+        "app.agent_runtime.graph.react_agent._invoke_model", side_effect=_mock_invoke
+    ):
+        result = await graph.ainvoke(
+            {
+                "messages": [HumanMessage(content="Hello")],
+                "iteration_count": 0,
+                "is_done": False,
+                "final_output": None,
+            }
+        )
+
+    assert result["is_done"] is True
+    assert executed == ["called"]
+    assert call_count == 2
+    assert result["messages"][-1].content == "done after tool"
 
 
 @pytest.mark.asyncio
