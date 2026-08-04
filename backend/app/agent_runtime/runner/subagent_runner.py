@@ -45,6 +45,7 @@ from app.agent_runtime.tools.hooks import (
 from app.agent_runtime.tools.impls.skill.skill import skill_tool_names_for_definition
 from app.agent_runtime.types import (
     DEFAULT_AGENT_RECURSION_LIMIT,
+    DEFAULT_SUBAGENT_MAX_ITERATIONS,
     ReactAgentConfig,
     TerminationCondition,
 )
@@ -346,6 +347,7 @@ class SubagentRunner:
             name=row.agent_key,
             tools=await self._build_tools(definition, runtime_state),
             termination=TerminationCondition(mode="no_tool_call"),
+            max_iterations=DEFAULT_SUBAGENT_MAX_ITERATIONS,
         )
         model_config = dict(self.model_config)
         session = await _open_session(self.session_factory)
