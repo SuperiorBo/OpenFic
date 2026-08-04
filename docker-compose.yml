@@ -14,8 +14,10 @@ services:
     environment:
       OPENFIC_DATA_DIR: /data
       OPENFIC_FRONTEND_DIST: /app/app/frontend_dist
-      # Optional: raise stream stall timeout for long writer/composer turns
-      # LANGCHAIN_OPENAI_STREAM_CHUNK_TIMEOUT_S: "300"
+      # Gap between stream chunks before StreamChunkTimeoutError.
+      # langchain_openai default is 120s; Grok mid-turn stalls often need more.
+      # Set to 0 to disable. Code default is also 300 if env is unset.
+      LANGCHAIN_OPENAI_STREAM_CHUNK_TIMEOUT_S: "300"
     restart: unless-stopped
 
 volumes:

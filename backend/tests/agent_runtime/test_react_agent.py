@@ -306,7 +306,7 @@ async def test_react_agent_emits_retry_event_for_retryable_llm_failure():
             "session_id": "sess_001",
             "node": "writer",
             "attempt": 2,
-            "max_attempts": 5,
+            "max_attempts": 8,
             "error_type": "Exception",
             "error_message": "temporary upstream failure",
         }

@@ -483,6 +483,48 @@ def test_create_chat_model_openai_compatible_enables_stream_usage_for_custom_bas
     assert model.stream_usage is True
 
 
+def test_openai_compatible_stream_chunk_timeout_default_is_300s(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("LANGCHAIN_OPENAI_STREAM_CHUNK_TIMEOUT_S", raising=False)
+    config = ModelConfig(
+        provider_type="openai-compatible",
+        base_url="https://custom.api/v1",
+        api_key="sk-test",
+        model_id="grok-4.5",
+    )
+    model = create_chat_model(config)
+    assert model.stream_chunk_timeout == 300.0
+
+
+def test_openai_compatible_stream_chunk_timeout_env_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LANGCHAIN_OPENAI_STREAM_CHUNK_TIMEOUT_S", "600")
+    config = ModelConfig(
+        provider_type="openai-compatible",
+        base_url="https://custom.api/v1",
+        api_key="sk-test",
+        model_id="grok-4.5",
+    )
+    model = create_chat_model(config)
+    assert model.stream_chunk_timeout == 600.0
+
+
+def test_openai_compatible_stream_chunk_timeout_env_disable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LANGCHAIN_OPENAI_STREAM_CHUNK_TIMEOUT_S", "0")
+    config = ModelConfig(
+        provider_type="openai-compatible",
+        base_url="https://custom.api/v1",
+        api_key="sk-test",
+        model_id="grok-4.5",
+    )
+    model = create_chat_model(config)
+    assert model.stream_chunk_timeout == 0.0
+
+
 def test_create_chat_model_deepseek_enables_stream_usage():
     config = ModelConfig(
         provider_type="deepseek",

@@ -48,11 +48,15 @@ Port mapping: host **9888** → container 8000.
 ## Patches on `fix/agent-stability-loops`
 
 1. **LLM retry** — retry empty stream / stream chunk timeout / empty assistant
-   turns inside the ReAct `llm_call` node (avoids immediate subagent death).
+   turns inside the ReAct `llm_call` node (up to 8 attempts; avoids immediate
+   subagent death on Grok jitter).
 2. **Edit line-number strip** — `fuzzy_replace` strips `N|` prefixes copied
    from `read_*` tools so `edit_*` stops failing in a loop.
 3. **Tool-failure circuit breaker** — same tool failing 3 times ends the turn.
 4. **Lower iteration caps** — primary default 80, subagent 40 (was 1000).
+5. **Stream chunk stall timeout** — OpenAI-compatible models use
+   `stream_chunk_timeout=300s` by default (was langchain 120s). Override with
+   `LANGCHAIN_OPENAI_STREAM_CHUNK_TIMEOUT_S` (0 disables).
 
 ## Intentionally not changed (yet)
 

@@ -98,7 +98,9 @@ _EMPTY_GENERATION_MARKERS = (
 )
 
 # Keep a few attempts: upstream free/unstable providers often recover on retry.
-LLM_RETRY_MAX_ATTEMPTS = 5
+# Grok-class upstreams jitter: empty stream / mid-turn stall often recover on
+# the next attempt. 5 was still short for multi-minute writing turns.
+LLM_RETRY_MAX_ATTEMPTS = 8
 LLM_RETRY_INITIAL_INTERVAL_S = 1.0
 LLM_RETRY_BACKOFF_FACTOR = 2.0
 

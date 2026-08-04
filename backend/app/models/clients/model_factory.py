@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import os
 from typing import Any
 
 from langchain_core.language_models import LanguageModelInput
@@ -20,6 +21,27 @@ from app.models.clients.model_params import (
     is_non_default,
     with_default,
 )
+
+# langchain_openai default is 120s between stream chunks. Grok / long-reasoning
+# OpenAI-compatible upstreams often stall mid-turn while still alive on TCP.
+# Override via LANGCHAIN_OPENAI_STREAM_CHUNK_TIMEOUT_S (seconds). 0/negative
+# disables the stall timer. None-like unset → 300s default for this deploy.
+_DEFAULT_STREAM_CHUNK_TIMEOUT_S = 300.0
+
+
+def _stream_chunk_timeout_s() -> float | None:
+    raw = os.environ.get("LANGCHAIN_OPENAI_STREAM_CHUNK_TIMEOUT_S")
+    if raw is None or raw.strip() == "":
+        return _DEFAULT_STREAM_CHUNK_TIMEOUT_S
+    try:
+        value = float(raw)
+    except ValueError:
+        return _DEFAULT_STREAM_CHUNK_TIMEOUT_S
+    if value <= 0:
+        # ChatOpenAI treats 0 as disabled; None would be stripped by
+        # _compact_kwargs and fall back to langchain's 120s default.
+        return 0.0
+    return value
 
 
 @dataclass
@@ -92,6 +114,9 @@ def _openai_compatible_kwargs(config: ModelConfig) -> dict[str, Any]:
         reasoning_effort=_enabled_reasoning_effort(config),
         max_retries=0,
         stream_usage=True,
+        # Explicit kwarg so ChatOpenAI applies stall timeout even if env is
+        # missing inside workers; env still wins when set (see helper).
+        stream_chunk_timeout=_stream_chunk_timeout_s(),
     )
     extra_body = {
         name: value
