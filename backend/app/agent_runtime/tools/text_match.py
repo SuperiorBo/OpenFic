@@ -6,6 +6,47 @@ import re
 from dataclasses import dataclass
 
 _LINE_SPLIT_RE = re.compile(r"[^\n]*\n|[^\n]+")
+# Prefixes injected by read_chapter / read_note / read_world_entry / read_character
+# for human-readable display. Agents often paste them into edit_* old/new text.
+_EDITOR_LINE_NUMBER_RE = re.compile(r"(?m)^[ \t]*\d+\|")
+
+
+def strip_editor_line_numbers(text: str) -> str:
+    """Strip ``N|`` display prefixes from editor tool output.
+
+    Read tools format content as ``1|line`` / ``2|line`` for the model, but the
+    stored document has no prefixes. If the model copies those lines into
+    ``old_content`` / ``new_content`` for edit tools, exact/fuzzy replace fails
+    with "未找到要替换的文本" and the agent loops forever.
+
+    Only strips when **every non-empty line** looks numbered (or the whole
+    block is a single numbered line). Mixed prose that happens to contain a
+    lone ``3|x`` mid-document is left untouched.
+    """
+    if not text or "|" not in text:
+        return text
+
+    lines = text.split("\n")
+    non_empty = [line for line in lines if line.strip()]
+    if not non_empty:
+        return text
+
+    numbered = 0
+    for line in non_empty:
+        stripped = line.lstrip()
+        if not stripped:
+            continue
+        # require digits + pipe at start of stripped line
+        i = 0
+        while i < len(stripped) and stripped[i].isdigit():
+            i += 1
+        if i > 0 and i < len(stripped) and stripped[i] == "|":
+            numbered += 1
+
+    if numbered < len(non_empty):
+        return text
+
+    return _EDITOR_LINE_NUMBER_RE.sub("", text)
 
 
 def normalize_for_fuzzy_match(text: str) -> str:
@@ -230,6 +271,14 @@ def fuzzy_replace(
     content = content.replace("\r\n", "\n").replace("\r", "\n")
     old_text = old_text.replace("\r\n", "\n").replace("\r", "\n")
     new_text = new_text.replace("\r\n", "\n").replace("\r", "\n")
+
+    # Drop read-tool line-number display prefixes so paste-from-read edits match
+    # stored content. Applied to both sides so replacements stay consistent.
+    old_text = strip_editor_line_numbers(old_text)
+    new_text = strip_editor_line_numbers(new_text)
+    if not old_text:
+        # Became empty after stripping (e.g. only "1|" lines) — treat as miss.
+        return None
 
     # 1. Exact match
     exact_index = content.find(old_text)

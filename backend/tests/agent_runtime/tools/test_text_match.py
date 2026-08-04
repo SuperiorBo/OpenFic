@@ -6,6 +6,7 @@ from app.agent_runtime.tools.text_match import (
     FuzzyReplaceResult,
     fuzzy_replace,
     normalize_for_fuzzy_match,
+    strip_editor_line_numbers,
 )
 
 
@@ -43,6 +44,55 @@ def test_normalize_preserves_cjk_fullwidth_punctuation() -> None:
 
 def test_normalize_keeps_regular_text_intact() -> None:
     assert normalize_for_fuzzy_match("plain text\nline two") == "plain text\nline two"
+
+
+# ---------------------------------------------------------------------------
+# strip_editor_line_numbers — read-tool display prefixes
+# ---------------------------------------------------------------------------
+
+
+def test_strip_editor_line_numbers_removes_uniform_prefixes() -> None:
+    raw = "1|铁器：自由铸造\n2|火器：高风险\n3|技术边界：试错"
+    assert strip_editor_line_numbers(raw) == "铁器：自由铸造\n火器：高风险\n技术边界：试错"
+
+
+def test_strip_editor_line_numbers_single_line() -> None:
+    assert strip_editor_line_numbers("7|生产力节奏：初期受限") == "生产力节奏：初期受限"
+
+
+def test_strip_editor_line_numbers_leaves_mixed_prose() -> None:
+    # A document that legitimately contains "3|foo" mid-line / mixed should stay.
+    mixed = "说明如下\n3|这不是全篇编号\n正文继续"
+    assert strip_editor_line_numbers(mixed) == mixed
+
+
+def test_fuzzy_replace_matches_after_stripping_read_tool_line_numbers() -> None:
+    """Regression: agents paste ``N|`` prefixes from read_* into edit_*."""
+    stored = (
+        "铁器：民间铁器可自由铸造。\n"
+        "火器：高风险可量产。\n"
+        "生产力节奏：初期受明末限制。"
+    )
+    old_from_read = (
+        "1|铁器：民间铁器可自由铸造。\n"
+        "2|火器：高风险可量产。\n"
+        "3|生产力节奏：初期受明末限制。"
+    )
+    new_from_read = (
+        "1|铁器：民间铁器可自由铸造。\n"
+        "2|火器：高风险可量产。\n"
+        "3|生产力节奏：初期受明末限制；详见科技线路笔记。"
+    )
+    result = fuzzy_replace(stored, old_from_read, new_from_read)
+    assert result is not None
+    assert "详见科技线路笔记" in result.new_content
+    assert "1|" not in result.new_content
+    assert result.new_content.startswith("铁器：")
+
+
+def test_fuzzy_replace_still_works_without_line_numbers() -> None:
+    result = fuzzy_replace("hello world", "world", "there")
+    assert result == FuzzyReplaceResult("hello there", used_fuzzy_match=False)
 
 
 # ---------------------------------------------------------------------------
