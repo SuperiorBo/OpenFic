@@ -1,0 +1,23 @@
+# Local source build for OpenFic (fork: SuperiorBo/OpenFic)
+# Keeps named volume openfic:/data so business data survives image swaps.
+services:
+  openfic:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: openfic:local
+    container_name: openfic
+    ports:
+      - "9888:8000"
+    volumes:
+      - openfic:/data
+    environment:
+      OPENFIC_DATA_DIR: /data
+      OPENFIC_FRONTEND_DIST: /app/app/frontend_dist
+      # Optional: raise stream stall timeout for long writer/composer turns
+      # LANGCHAIN_OPENAI_STREAM_CHUNK_TIMEOUT_S: "300"
+    restart: unless-stopped
+
+volumes:
+  openfic:
+    external: true
