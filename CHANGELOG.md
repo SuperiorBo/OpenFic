@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.9.1](https://github.com/syrizelink/OpenFic/compare/v0.9.0...v0.9.1) (2026-08-05)
+
+
+### 🐛 问题修复
+
+* **agent:** 修复 ask_user 问题面板内容无法滚动的问题 ([#249](https://github.com/syrizelink/OpenFic/issues/249)) ([2921d0a](https://github.com/syrizelink/OpenFic/commit/2921d0aa743aaf418d07277bed9f59af67508f57))
+* **backend:** 修复测试夹具重复初始化导致后端测试耗时过长的问题 ([#241](https://github.com/syrizelink/OpenFic/issues/241)) ([a355e7f](https://github.com/syrizelink/OpenFic/commit/a355e7f16a5afc14da98cc238fc4a021a9e73973))
+* **desktop:** 修复 Socket 首次连接失败导致启动中断的问题 ([#248](https://github.com/syrizelink/OpenFic/issues/248)) ([7b84765](https://github.com/syrizelink/OpenFic/commit/7b847652037b165f3f7129e59c3564ce617a290c))
+* **desktop:** 修复启动时窗口延迟显示的问题 ([#246](https://github.com/syrizelink/OpenFic/issues/246)) ([6d0e05f](https://github.com/syrizelink/OpenFic/commit/6d0e05f97753a3bcdd329be6f9a311b07714b4b6))
+* **desktop:** 修复更新元数据缺失导致检查报错的问题 ([#239](https://github.com/syrizelink/OpenFic/issues/239)) ([3b77aab](https://github.com/syrizelink/OpenFic/commit/3b77aabe38134b34f46331d687fd0ca7ba4e8217))
+* **index:** 修复分块配置保存使用旧输入值的问题 ([#250](https://github.com/syrizelink/OpenFic/issues/250)) ([ed75ce4](https://github.com/syrizelink/OpenFic/commit/ed75ce46a9be88a6044277d74abf5fe11123bf16))
+
+
+### 👷 CI/CD
+
+* **desktop:** 修复多架构构建导致发布包损坏的问题 ([#247](https://github.com/syrizelink/OpenFic/issues/247)) ([7ffe8cd](https://github.com/syrizelink/OpenFic/commit/7ffe8cd1a254e2c2b892bb806d6c83e75edd156f))
+
+## [0.9.0](https://github.com/syrizelink/OpenFic/compare/v0.8.1...v0.9.0) (2026-08-04)
+
+
+### ✨ 新功能
+
+* **agent:** 支持用户消息图片附件输入 ([#229](https://github.com/syrizelink/OpenFic/issues/229)) ([2c12697](https://github.com/syrizelink/OpenFic/commit/2c126978b101dc3c76b43556e7017084f27f97f2))
+* **desktop:** 添加壳层国际化支持 ([#223](https://github.com/syrizelink/OpenFic/issues/223)) ([90f26c1](https://github.com/syrizelink/OpenFic/commit/90f26c16a764c941124a3e70c8b2693b32a5f1d9))
+
+
+### 🐛 问题修复
+
+* **editor:** 修复移动端正文点击重复呼出键盘的问题 ([#226](https://github.com/syrizelink/OpenFic/issues/226)) ([79d03fa](https://github.com/syrizelink/OpenFic/commit/79d03fa3c9f32dc8183e7b2ce234d747c12bef5d))
+* **providers:** 修复目录中部分提供商端点 URL 缺失的问题 ([#230](https://github.com/syrizelink/OpenFic/issues/230)) ([0006c90](https://github.com/syrizelink/OpenFic/commit/0006c906b8c878c07859d3e2b7afda02f4b2e2a1))
+* **storage:** 清理数据库关联运行时数据 ([#238](https://github.com/syrizelink/OpenFic/issues/238)) ([b8d2ca5](https://github.com/syrizelink/OpenFic/commit/b8d2ca5d58d64ecaf2acee919a0638104b0dce72))
+* **summary:** 修复跨卷删除章节导致区间摘要丢失的问题 ([#225](https://github.com/syrizelink/OpenFic/issues/225)) ([9ecaa07](https://github.com/syrizelink/OpenFic/commit/9ecaa07fb38e9eb845135aabe0336d21adc0966c))
+
+
+### 🔧 杂项
+
+* **desktop:** 添加桌面端菜单栏 ([#221](https://github.com/syrizelink/OpenFic/issues/221)) ([0d9bbe8](https://github.com/syrizelink/OpenFic/commit/0d9bbe8dc9f5cfb186cf2a196b40b4d577c113b1))
+
 ## [0.8.1](https://github.com/syrizelink/OpenFic/compare/v0.8.0...v0.8.1) (2026-07-31)
 
 
