@@ -563,3 +563,18 @@ def test_create_chat_model_deepseek_uses_bundled_tiktoken_encoding(
     )
 
     assert model.get_token_ids("OpenFic 离线 token 测试")
+
+
+def test_openai_compatible_stream_chunk_timeout_env_invalid_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Invalid env values fall back to the deploy default instead of crashing."""
+    monkeypatch.setenv("LANGCHAIN_OPENAI_STREAM_CHUNK_TIMEOUT_S", "not-a-number")
+    config = ModelConfig(
+        provider_type="openai-compatible",
+        base_url="https://custom.api/v1",
+        api_key="sk-test",
+        model_id="custom-model",
+    )
+    model = create_chat_model(config)
+    assert model.stream_chunk_timeout == 300.0
