@@ -99,6 +99,12 @@ def _three_level_reasoning_effort(
     return "high" if reasoning_effort in {"xhigh", "max"} else reasoning_effort
 
 
+def _request_timeout() -> tuple[float, float]:
+    from app.settings import settings
+
+    return (settings.llm_connect_timeout, settings.llm_total_timeout)
+
+
 def _openai_compatible_kwargs(config: ModelConfig) -> dict[str, Any]:
     kwargs = _compact_kwargs(
         model=config.model_id,
@@ -114,9 +120,10 @@ def _openai_compatible_kwargs(config: ModelConfig) -> dict[str, Any]:
         reasoning_effort=_enabled_reasoning_effort(config),
         max_retries=0,
         stream_usage=True,
-        # Explicit kwarg so ChatOpenAI applies stall timeout even if env is
+# Explicit kwarg so ChatOpenAI applies stall timeout even if env is
         # missing inside workers; env still wins when set (see helper).
         stream_chunk_timeout=_stream_chunk_timeout_s(),
+        timeout=_request_timeout(),
     )
     extra_body = {
         name: value
@@ -151,6 +158,7 @@ def create_chat_model(config: ModelConfig) -> Runnable[LanguageModelInput, BaseM
             max_tokens=config.max_tokens or 4096,
             effort=reasoning_effort,
             max_retries=0,
+            timeout=_request_timeout()[1],
         ))
 
     if provider == "google-genai":
@@ -194,6 +202,7 @@ def create_chat_model(config: ModelConfig) -> Runnable[LanguageModelInput, BaseM
             reasoning_effort=reasoning_effort,
             max_retries=0,
             stream_usage=True,
+            timeout=_request_timeout(),
         ))
 
     if provider == "mistral":
@@ -207,6 +216,7 @@ def create_chat_model(config: ModelConfig) -> Runnable[LanguageModelInput, BaseM
             top_p=_non_default(config.top_p, DEFAULT_TOP_P),
             max_tokens=config.max_tokens,
             max_retries=0,
+            timeout=_request_timeout()[1],
         )
         if reasoning_effort:
             mistral_kwargs["model_kwargs"] = {"reasoning_effort": reasoning_effort}
@@ -230,6 +240,7 @@ def create_chat_model(config: ModelConfig) -> Runnable[LanguageModelInput, BaseM
             ),
             reasoning={"effort": reasoning_effort} if reasoning_effort else None,
             max_retries=0,
+            timeout=int(_request_timeout()[1]),
         ))
 
     if provider == "groq":
@@ -243,6 +254,7 @@ def create_chat_model(config: ModelConfig) -> Runnable[LanguageModelInput, BaseM
             max_tokens=config.max_tokens,
             reasoning_effort=_three_level_reasoning_effort(reasoning_effort),
             max_retries=0,
+            timeout=_request_timeout(),
         )
         if config.top_p is not None:
             groq_kwargs["model_kwargs"] = {"top_p": config.top_p}

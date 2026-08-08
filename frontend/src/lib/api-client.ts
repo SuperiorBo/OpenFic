@@ -1497,24 +1497,11 @@ export async function deleteAllWorldInfoEntries(
 export async function moveWorldInfoEntry(
   entryId: string,
   newOrder: number,
-): Promise<WorldInfoEntry> {
+): Promise<WorldInfoEntryBrief> {
   const response = await apiClient.post(`/world-info-entries/${entryId}/move`, {
     new_order: newOrder,
   });
-  return transformWorldInfoEntry(response.data);
-}
-
-/**
- * 批量重新排序世界书条目
- */
-export async function reorderWorldInfoEntries(
-  worldInfoId: string,
-  orders: Record<string, number>,
-): Promise<WorldInfoEntry[]> {
-  const response = await apiClient.post(`/world-info/${worldInfoId}/entries/reorder`, {
-    orders,
-  });
-  return response.data.map(transformWorldInfoEntry);
+  return transformWorldInfoEntryBrief(response.data);
 }
 
 /**
@@ -2276,6 +2263,24 @@ export async function fetchActiveSubagents(
 export async function fetchSubagentSession(childRunId: string): Promise<SubagentSessionPayload> {
   const response = await apiClient.get(`/agent/subagents/${childRunId}`);
   return transformSubagentSessionPayload(response.data as Record<string, unknown>);
+}
+
+/**
+ * 取消单个 subagent 会话（中断其任务与重试，主会话继续）。
+ */
+export async function cancelSubagentSession(
+  parentSessionId: string,
+  childRunId: string,
+): Promise<AgentCancelResponse> {
+  const response = await apiClient.post(
+    `/agent/sessions/${parentSessionId}/subagents/${childRunId}/cancel`,
+  );
+  const data = response.data as Record<string, unknown>;
+  return {
+    success: data.success === true,
+    session_id: String(data.session_id ?? childRunId),
+    message: String(data.message ?? ""),
+  };
 }
 
 /**

@@ -1509,6 +1509,7 @@ export const AssistantSidebar = forwardRef<AssistantSidebarHandle, AssistantSide
                       : undefined
                   }
                   onRollback={async () => null}
+                  onAbortRetry={subagentSession.cancelSession}
                   onAtBottomChange={setIsMessagesAtBottom}
                   scrollToBottomFnRef={scrollToBottomFnRef}
                 />
@@ -1532,7 +1533,7 @@ export const AssistantSidebar = forwardRef<AssistantSidebarHandle, AssistantSide
             >
               <IconButton
                 size="2"
-                variant="soft"
+                variant="solid"
                 color="gray"
                 onClick={() => scrollToBottomFnRef.current?.()}
                 aria-label={t("assistant.scrollToBottom")}

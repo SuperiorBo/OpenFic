@@ -12,7 +12,7 @@ import inspect
 import json
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from typing import TYPE_CHECKING, Annotated, Any, Literal, NoReturn, Optional, TypedDict, cast
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Optional, TypedDict, cast
 
 from langchain_core.messages import (
     AIMessage,
@@ -24,10 +24,9 @@ from langchain_core.messages import (
 from langchain_core.messages.tool import ToolCall
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
-from langgraph._internal._constants import CONF, CONFIG_KEY_RUNTIME
+from langgraph._internal._constants import CONF
 from langgraph.errors import GraphInterrupt
 from langgraph.graph import END, START, StateGraph
-from langgraph.runtime import Runtime
 from langgraph.types import RetryPolicy
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -51,6 +50,13 @@ from app.agent_runtime.context.compaction.window import (
 )
 from app.agent_runtime.context.processors.to_langchain import to_langchain_messages
 from app.agent_runtime.context.types import ContextMessage
+from app.agent_runtime.graph.llm_invoke import (
+    EmptyResponseError,
+    RetryEventSink,
+    _TimedStream,
+    invoke_model_with_retry,
+    load_llm_invoke_settings,
+)
 from app.agent_runtime.persistence import compaction_repo
 from app.agent_runtime.tool_call_recovery import (
     build_malformed_tool_call_error,
@@ -88,36 +94,30 @@ class ReactState(TypedDict):
 # ---------------------------------------------------------------------------
 
 
-# Transient upstream failures that should be retried inside the llm_call node
-# instead of failing the whole subagent turn (which forces the primary agent to
-# re-dispatch and burn far more tokens).
-_EMPTY_GENERATION_MARKERS = (
-    "No generation chunks were returned",
-    "LLM流式调用未返回响应",
-    "empty LLM response without tool calls",
-)
-
-# Keep a few attempts: upstream free/unstable providers often recover on retry.
-# Grok-class upstreams jitter: empty stream / mid-turn stall often recover on
-# the next attempt. 5 was still short for multi-minute writing turns.
-LLM_RETRY_MAX_ATTEMPTS = 8
-LLM_RETRY_INITIAL_INTERVAL_S = 1.0
-LLM_RETRY_BACKOFF_FACTOR = 2.0
-
-
-async def _invoke_model(model: Any, messages: list[BaseMessage]) -> AIMessage:
+async def _invoke_model(
+    model: Any,
+    messages: list[BaseMessage],
+    *,
+    chunk_timeout: float | None = None,
+    total_timeout: float | None = None,
+) -> AIMessage:
     """Stream the LLM response and normalize it for checkpoint persistence."""
     start_time = time.perf_counter()
     first_token_ms: int | None = None
     response: AIMessage | None = None
 
-    async for chunk in model.astream(messages):
+    stream = _TimedStream(
+        model.astream(messages),
+        chunk_timeout=chunk_timeout,
+        total_timeout=total_timeout,
+    )
+    async for chunk in stream:
         if first_token_ms is None:
             first_token_ms = int((time.perf_counter() - start_time) * 1000)
         response = chunk if response is None else response + chunk
 
     if response is None:
-        raise ValueError("LLM流式调用未返回响应")
+        raise EmptyResponseError("LLM流式调用未返回响应")
 
     normalized = AIMessage(
         content=extract_text_content(response.content),
@@ -132,106 +132,9 @@ async def _invoke_model(model: Any, messages: list[BaseMessage]) -> AIMessage:
     return normalized
 
 
-RetryEventSink = Callable[[dict[str, Any]], Awaitable[None]]
-
-
-def _is_empty_generation_error(exc: BaseException) -> bool:
-    if not isinstance(exc, ValueError):
-        return False
-    message = str(exc)
-    return any(marker in message for marker in _EMPTY_GENERATION_MARKERS)
-
-
-def llm_should_retry_on(exc: Exception) -> bool:
-    """Return True for transient LLM/upstream failures worth retrying.
-
-    LangGraph's default_retry_on explicitly skips ValueError / TimeoutError /
-    OSError. That drops the two failure modes we see most on unstable
-    OpenAI-compatible upstreams:
-
-    - ``ValueError("No generation chunks were returned")`` (empty stream)
-    - ``StreamChunkTimeoutError`` (TimeoutError subclass; content stall)
-
-    Empty assistant turns are converted to a ValueError in ``llm_call`` so they
-    also hit this path, keeping the subagent alive instead of bubbling up to the
-    primary agent for a full re-dispatch.
-    """
-    if _is_empty_generation_error(exc):
-        return True
-
-    # Non-empty ValueError is usually validation / contract failure — do not retry.
-    # (Empty-generation ValueErrors are handled above.)
-    if isinstance(exc, ValueError):
-        return False
-
-    # StreamChunkTimeoutError subclasses TimeoutError (and OSError).
-    if isinstance(exc, TimeoutError):
-        return True
-
-    try:
-        import httpx
-    except ImportError:  # pragma: no cover
-        httpx = None  # type: ignore[assignment]
-
-    if httpx is not None:
-        if isinstance(exc, httpx.TimeoutException):
-            return True
-        if isinstance(exc, httpx.TransportError):
-            return True
-        if isinstance(exc, httpx.HTTPStatusError):
-            code = exc.response.status_code
-            return code == 429 or 500 <= code < 600
-
-    try:
-        import requests
-    except ImportError:  # pragma: no cover
-        requests = None  # type: ignore[assignment]
-
-    if requests is not None and isinstance(exc, requests.HTTPError):
-        if exc.response is None:
-            return True
-        code = exc.response.status_code
-        return code == 429 or 500 <= code < 600
-
-    status_code = _error_status_code(exc)
-    if status_code is not None:
-        if status_code in {400, 401, 403, 404, 422}:
-            return False
-        if status_code == 429 or status_code >= 500:
-            return True
-
-    if isinstance(exc, ConnectionError):
-        return True
-
-    # Programming / deterministic errors — do not retry.
-    if isinstance(
-        exc,
-        (
-            TypeError,
-            ArithmeticError,
-            ImportError,
-            LookupError,
-            NameError,
-            SyntaxError,
-            RuntimeError,
-            ReferenceError,
-            StopIteration,
-            StopAsyncIteration,
-            OSError,
-        ),
-    ):
-        return False
-
-    # Unknown Exception subclasses (provider SDKs, etc.) — retry.
-    return True
-
-
-LLM_RETRY_POLICY = RetryPolicy(
-    max_attempts=LLM_RETRY_MAX_ATTEMPTS,
-    initial_interval=LLM_RETRY_INITIAL_INTERVAL_S,
-    backoff_factor=LLM_RETRY_BACKOFF_FACTOR,
-    retry_on=llm_should_retry_on,
-)
+# 节点级重试已禁用：超时与重试统一由模型调用层（invoke_model_with_retry）处理，
+# 避免双层重试叠加。保留常量名以便测试禁用兜底重试。
+LLM_RETRY_POLICY = RetryPolicy(max_attempts=1)
 
 
 def _get_configurable(config: RunnableConfig | None) -> dict[str, Any]:
@@ -241,64 +144,9 @@ def _get_configurable(config: RunnableConfig | None) -> dict[str, Any]:
     return configurable if isinstance(configurable, dict) else {}
 
 
-def _get_runtime(config: RunnableConfig | None) -> Runtime[Any] | None:
-    runtime = _get_configurable(config).get(CONFIG_KEY_RUNTIME)
-    return runtime if isinstance(runtime, Runtime) else None
-
-
-def _get_node_attempt(config: RunnableConfig | None) -> int:
-    runtime = _get_runtime(config)
-    execution_info = (
-        getattr(runtime, "execution_info", None) if runtime is not None else None
-    )
-    attempt = getattr(execution_info, "node_attempt", None)
-    return attempt if isinstance(attempt, int) and attempt > 0 else 1
-
-
 def _get_retry_event_sink(config: RunnableConfig | None) -> RetryEventSink | None:
     value = _get_configurable(config).get("retry_event_sink")
     return value if callable(value) else None
-
-
-def _should_retry_on(policy: RetryPolicy, exc: Exception) -> bool:
-    retry_on = policy.retry_on
-    if isinstance(retry_on, type):
-        return isinstance(exc, retry_on)
-    if isinstance(retry_on, Sequence):
-        return any(
-            isinstance(exc, cast(type[BaseException], exc_type))
-            for exc_type in retry_on
-        )
-    if callable(retry_on):
-        return bool(retry_on(exc))
-    return False
-
-
-async def _emit_retry_event(
-    config: RunnableConfig | None,
-    *,
-    session_id: str | None,
-    node: str,
-    attempt: int,
-    max_attempts: int,
-    exc: Exception,
-) -> None:
-    sink = _get_retry_event_sink(config)
-    if sink is None or not session_id:
-        return
-    try:
-        await sink(
-            {
-                "session_id": session_id,
-                "node": node,
-                "attempt": attempt,
-                "max_attempts": max_attempts,
-                "error_type": exc.__class__.__name__,
-                "error_message": str(exc),
-            }
-        )
-    except Exception:
-        return
 
 
 def _extract_usage(message: AIMessage) -> dict[str, Any] | None:
@@ -956,36 +804,26 @@ def create_react_agent(
 
         audit = await _start_audit(configurable, messages)
         active_audit = audit
-        session_id = (
-            runtime_state.get("session_id")
-            if isinstance(runtime_state, Mapping)
-            else None
-        )
-        session_id_str = session_id if isinstance(session_id, str) else None
-
-        async def _raise_for_retry(exc: Exception) -> NoReturn:
+        try:
+            session_id = (
+                runtime_state.get("session_id")
+                if isinstance(runtime_state, Mapping)
+                else None
+            )
+            response = await invoke_model_with_retry(
+                bound_model or model,
+                messages,
+                invoke=_invoke_model,
+                settings=load_llm_invoke_settings(),
+                session_id=session_id if isinstance(session_id, str) else None,
+                node=react_config.name,
+                retry_event_sink=_get_retry_event_sink(config),
+            )
+        except Exception as exc:
             if audit is not None:
                 _record_audit_error(audit, exc)
                 await _finish_active_audit(status="error")
-            current_attempt = _get_node_attempt(config)
-            if current_attempt < LLM_RETRY_POLICY.max_attempts and _should_retry_on(
-                LLM_RETRY_POLICY, exc
-            ):
-                await _emit_retry_event(
-                    config,
-                    session_id=session_id_str,
-                    node=react_config.name,
-                    attempt=current_attempt + 1,
-                    max_attempts=LLM_RETRY_POLICY.max_attempts,
-                    exc=exc,
-                )
-            raise exc
-
-        try:
-            response = await _invoke_model(bound_model or model, messages)
-        except Exception as exc:
-            await _raise_for_retry(exc)
-            raise  # pragma: no cover — _raise_for_retry always raises
+            raise
 
         recovered_tool_calls = cast(
             list[ToolCall],

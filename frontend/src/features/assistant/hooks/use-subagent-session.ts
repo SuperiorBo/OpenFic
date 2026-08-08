@@ -3,12 +3,17 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "@/components";
 import i18n from "@/i18n";
 import type {
+  AgentEvent,
   AgentMessage,
   AgentSessionStatus,
   SubagentSessionPayload,
   TokenUsageState,
 } from "@/lib/agent.types";
-import { fetchSubagentSession, submitAgentToolApproval } from "@/lib/api-client";
+import {
+  fetchSubagentSession,
+  submitAgentToolApproval,
+  cancelSubagentSession,
+} from "@/lib/api-client";
 import type { TaskListItem } from "@/lib/task.types";
 
 import {
@@ -23,6 +28,11 @@ import {
   type AgentTranscriptState,
 } from "../lib/agent-transcript-state";
 import { createApprovalPreviewToolMessage } from "../lib/chapter-tool-preview";
+import { clearRetryMessages } from "../lib/retry-message-state";
+import {
+  createStreamingDeltaCoalescer,
+  isStreamingDeltaEvent,
+} from "../lib/streaming-delta-coalescer";
 import { createPendingApprovalEvent } from "../lib/subagent-session-approval";
 import { joinSubagentSession, subscribeSubagentSessionEvents } from "../lib/subagent-socket";
 import { buildAgentMessagesFromTaskMessages } from "../lib/task-message-agent-mapping";
@@ -127,6 +137,51 @@ export function useSubagentSession(
     setCurrentStage(nextState.currentStage);
   }, []);
 
+  const applySubagentEvent = useCallback(
+    (event: AgentEvent) => {
+      const result = applyAgentTranscriptEventToLiveState(transcriptStateRef.current, event, {
+        approvalPreviewFactory: createApprovalPreviewToolMessage,
+        defaultRunningStage: getStageTextForAgentKey(session?.agentKey) || session?.agentKey || "",
+        fallbackAgent: session?.agentKey,
+        getStageTextForAgent: getStageTextForAgentKey,
+        getStageTextForStage: getStageTextForStageKey,
+      });
+      commitTranscriptState(result.state);
+      setSession((current) => {
+        if (!current) return current;
+        const nextStatus = toPayloadStatus(result.state.status, current.status);
+        const isTerminal = result.state.status === "completed" || result.state.status === "error";
+        const nextPendingApproval =
+          result.message?.type === "approval"
+            ? (result.message.payload ?? current.pendingApproval)
+            : nextStatus === "waiting_user"
+              ? current.pendingApproval
+              : null;
+        return {
+          ...current,
+          status: nextStatus,
+          isRunning: result.state.isRunning,
+          isActive: isTerminal ? false : current.isActive || result.state.isRunning,
+          pendingApproval: nextPendingApproval,
+        };
+      });
+      return result;
+    },
+    [commitTranscriptState, session?.agentKey],
+  );
+
+  const applySubagentEventRef = useRef(applySubagentEvent);
+  applySubagentEventRef.current = applySubagentEvent;
+
+  const deltaCoalescerRef = useRef<ReturnType<typeof createStreamingDeltaCoalescer> | null>(null);
+  if (deltaCoalescerRef.current === null) {
+    deltaCoalescerRef.current = createStreamingDeltaCoalescer((events) => {
+      for (const event of events) {
+        applySubagentEventRef.current(event);
+      }
+    });
+  }
+
   const handleToolApproval = useCallback(
     async (approvalId: string, approved: boolean) => {
       const parentSessionId = session?.parentSessionId;
@@ -177,6 +232,28 @@ export function useSubagentSession(
     },
     [commitTranscriptState, session?.parentSessionId],
   );
+
+  const cancelSession = useCallback(async () => {
+    const parentSessionId = session?.parentSessionId;
+    if (!parentSessionId || !childRunId) return;
+    try {
+      await cancelSubagentSession(parentSessionId, childRunId);
+    } catch (error) {
+      console.error("Failed to cancel subagent session:", error);
+      toast.error(i18n.t("assistant.cancelSubagentFailed"));
+      return;
+    }
+    commitTranscriptState({
+      ...transcriptStateRef.current,
+      messages: clearRetryMessages(transcriptStateRef.current.messages),
+      status: "error",
+      isRunning: false,
+      currentStage: "",
+    });
+    setSession((current) =>
+      current ? { ...current, status: "cancelled", isRunning: false, isActive: false } : current,
+    );
+  }, [childRunId, commitTranscriptState, session?.parentSessionId]);
 
   const load = useCallback(async () => {
     if (!childRunId) {
@@ -249,6 +326,12 @@ export function useSubagentSession(
     const cleanup = subscribeSubagentSessionEvents(
       targetThreadId,
       (event) => {
+        if (isStreamingDeltaEvent(event)) {
+          deltaCoalescerRef.current?.push(event);
+          return;
+        }
+        deltaCoalescerRef.current?.flush();
+
         if (event.type === "compaction_error") {
           suppressNextErrorAfterCompactionErrorRef.current = true;
           const payload = event.payload ?? {};
@@ -310,34 +393,7 @@ export function useSubagentSession(
           );
         }
 
-        const result = applyAgentTranscriptEventToLiveState(transcriptStateRef.current, event, {
-          approvalPreviewFactory: createApprovalPreviewToolMessage,
-          defaultRunningStage:
-            getStageTextForAgentKey(session?.agentKey) || session?.agentKey || "",
-          fallbackAgent: session?.agentKey,
-          getStageTextForAgent: getStageTextForAgentKey,
-          getStageTextForStage: getStageTextForStageKey,
-        });
-
-        commitTranscriptState(result.state);
-        setSession((current) => {
-          if (!current) return current;
-          const nextStatus = toPayloadStatus(result.state.status, current.status);
-          const isTerminal = result.state.status === "completed" || result.state.status === "error";
-          const nextPendingApproval =
-            result.message?.type === "approval"
-              ? (result.message.payload ?? current.pendingApproval)
-              : nextStatus === "waiting_user"
-                ? current.pendingApproval
-                : null;
-          return {
-            ...current,
-            status: nextStatus,
-            isRunning: result.state.isRunning,
-            isActive: isTerminal ? false : current.isActive || result.state.isRunning,
-            pendingApproval: nextPendingApproval,
-          };
-        });
+        applySubagentEvent(event);
       },
       (error) => {
         setSession((current) =>
@@ -368,8 +424,10 @@ export function useSubagentSession(
 
     return () => {
       cleanup();
+      deltaCoalescerRef.current?.dispose();
     };
   }, [
+    applySubagentEvent,
     childRunId,
     childThreadId,
     commitTranscriptState,
@@ -387,5 +445,6 @@ export function useSubagentSession(
     tokenUsage,
     load,
     handleToolApproval,
+    cancelSession,
   };
 }
