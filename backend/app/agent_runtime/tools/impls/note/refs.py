@@ -29,7 +29,9 @@ class NoteRef(BaseModel):
         - JSON object string -> parsed dict
         - bare string without braces -> treat as title
         """
-        if data is None or isinstance(data, dict):
+        if data is None:
+            return {}
+        if isinstance(data, dict):
             return data
         if not isinstance(data, str):
             return data
