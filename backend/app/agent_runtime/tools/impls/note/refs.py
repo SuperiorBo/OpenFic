@@ -5,7 +5,9 @@ Note 工具引用解析。
 
 from collections.abc import Sequence
 
-from pydantic import BaseModel, Field
+import json
+
+from pydantic import BaseModel, Field, model_validator
 
 from app.agent_runtime.tools.errors import ToolExecutionError
 from app.storage.models.note import Note
@@ -16,6 +18,35 @@ class NoteRef(BaseModel):
     id: str | None = Field(default=None, description="按 ID 定位")
     title: str | None = Field(default=None, description="按标题定位")
     path: str | None = Field(default=None, description="路径，如 /设定/角色/笔记标题")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_string_ref(cls, data):
+        """Coerce a string where an object is expected (model serialization bug).
+
+        Some models (e.g. deepseek-v4-flash via relay) pass note_ref as a
+        JSON string like '{"title": "..."}' or even a bare title/path. Accept:
+        - JSON object string -> parsed dict
+        - bare string without braces -> treat as title
+        """
+        if data is None or isinstance(data, dict):
+            return data
+        if not isinstance(data, str):
+            return data
+        stripped = data.strip()
+        if not stripped:
+            return {}
+        if stripped.startswith("{"):
+            try:
+                parsed = json.loads(stripped)
+            except json.JSONDecodeError:
+                return {"title": stripped}
+            if isinstance(parsed, dict):
+                return parsed
+            return {"title": stripped}
+        if stripped.startswith("/") or "/" in stripped:
+            return {"path": stripped}
+        return {"title": stripped}
 
 
 class CategoryRef(BaseModel):
