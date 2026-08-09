@@ -110,6 +110,19 @@ _CONTEXT_PATTERNS = (
     "prompt is too long",
     "too many tokens",
 )
+# Transient TLS / transport corruption. Go-based relays (CLIProxyAPI etc.)
+# report record-MAC failures as a plain error string with no HTTP status;
+# they mean the TLS session broke mid-stream and the call can be retried.
+_NETWORK_TRANSPORT_PATTERNS = (
+    "bad record mac",
+    "tls: bad record mac",
+    "tls handshake",
+    "remote error: tls",
+    "connection reset",
+    "broken pipe",
+    "connection aborted",
+    "peer closed connection",
+)
 
 
 def _contains_any(message: str, patterns: tuple[str, ...]) -> bool:
@@ -180,6 +193,10 @@ def classify_error(exc: BaseException) -> RetryOutcome:
         return RetryOutcome(RetryDecision.RETRY, RetryCategory.NETWORK)
     if "ratelimit" in exc_name:
         return RetryOutcome(RetryDecision.RETRY, RetryCategory.RATE_LIMIT)
+    if _contains_any(message, _NETWORK_TRANSPORT_PATTERNS):
+        # TLS record-MAC / transport corruption (e.g. Go relay mid-stream
+        # break) — transient, retry with network backoff.
+        return RetryOutcome(RetryDecision.RETRY, RetryCategory.NETWORK)
 
     return RetryOutcome(RetryDecision.NO_RETRY, RetryCategory.OTHER)
 

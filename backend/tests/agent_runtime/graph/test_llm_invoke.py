@@ -123,6 +123,28 @@ class TestClassifyError:
         assert outcome.decision is RetryDecision.RETRY
         assert outcome.category is RetryCategory.NETWORK
 
+    def test_retries_tls_bad_record_mac(self) -> None:
+        """Go relay TLS corruption (CLIProxyAPI mid-stream break) is retried."""
+        outcome = classify_error(RuntimeError("local error: tls: bad record MAC"))
+        assert outcome.decision is RetryDecision.RETRY
+        assert outcome.category is RetryCategory.NETWORK
+
+    def test_retries_tls_bad_record_mac_with_prefix(self) -> None:
+        outcome = classify_error(OSError("tls: bad record mac while reading"))
+        assert outcome.decision is RetryDecision.RETRY
+        assert outcome.category is RetryCategory.NETWORK
+
+    def test_retries_tls_handshake_and_peer_reset(self) -> None:
+        for msg in ("tls handshake timeout", "remote error: tls: handshake",
+                    "peer closed connection", "broken pipe"):
+            outcome = classify_error(RuntimeError(msg))
+            assert outcome.decision is RetryDecision.RETRY, msg
+            assert outcome.category is RetryCategory.NETWORK, msg
+
+    def test_no_retry_unrelated_runtime_error(self) -> None:
+        outcome = classify_error(RuntimeError("boom"))
+        assert outcome.decision is RetryDecision.NO_RETRY
+
     def test_retries_empty_response(self) -> None:
         outcome = classify_error(EmptyResponseError("empty"))
         assert outcome.decision is RetryDecision.RETRY
