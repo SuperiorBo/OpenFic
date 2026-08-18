@@ -11,13 +11,21 @@ import { saveLanguagePreference } from "@/i18n";
 
 import "./settings-dialog.css";
 
-import { applyCodeFontFamily, applyFontFamily, loadConfiguredFonts } from "@/lib/font-utils";
+import {
+  applyBaseFontSize,
+  applyCodeFontFamily,
+  applyEditorFontSize,
+  applyFontFamily,
+  loadConfiguredFonts,
+} from "@/lib/font-utils";
 import { OVERALL_INDEX_STATUS_QUERY_KEY } from "@/lib/index-status";
 
 import { AdvancedSettings } from "../components/advanced-settings";
 import { AgentDefinitionsSettings } from "../components/agent-definitions-settings";
 import { AgentToolsSettings } from "../components/agent-tools-settings";
 import { ConnectionsSettings } from "../components/connections-settings";
+import { ContextSettings } from "../components/context-settings";
+import { EditorSettings } from "../components/editor-settings";
 import { GeneralSettings } from "../components/general-settings";
 import { IndexSettings } from "../components/index-settings";
 import { ModelsSettings } from "../components/models-settings";
@@ -62,9 +70,11 @@ interface SettingsContentProps {
 
 const CATEGORY_TITLE_KEY_MAP: Record<SettingsCategory, string> = {
   general: "settings.general",
+  editor: "settings.editor",
   connections: "settings.connections",
   models: "settings.models",
   index: "settings.index",
+  context: "settings.context",
   "agent-tools": "settings.agentTools",
   rules: "settings.rules",
   skills: "settings.skills",
@@ -130,7 +140,14 @@ export function SettingsContent({
   useEffect(() => {
     if (serverSettings?.fontFamily) applyFontFamily(serverSettings.fontFamily);
     if (serverSettings?.codeFontFamily) applyCodeFontFamily(serverSettings.codeFontFamily);
-  }, [serverSettings?.fontFamily, serverSettings?.codeFontFamily]);
+    if (serverSettings?.baseFontSize) applyBaseFontSize(serverSettings.baseFontSize);
+    if (serverSettings?.editorFontSize) applyEditorFontSize(serverSettings.editorFontSize);
+  }, [
+    serverSettings?.fontFamily,
+    serverSettings?.codeFontFamily,
+    serverSettings?.baseFontSize,
+    serverSettings?.editorFontSize,
+  ]);
 
   useEffect(() => {
     function handleResize() {
@@ -159,6 +176,8 @@ export function SettingsContent({
         theme: settings.theme,
         font_family: settings.fontFamily,
         code_font_family: settings.codeFontFamily,
+        base_font_size: settings.baseFontSize,
+        editor_font_size: settings.editorFontSize,
         agent_tool_permissions: settings.agentToolPermissions.map((item) => ({
           tool_name: item.toolName,
           mode: item.mode,
@@ -184,6 +203,8 @@ export function SettingsContent({
         onAppearanceChange(previousSettings.theme);
         applyFontFamily(previousSettings.fontFamily);
         applyCodeFontFamily(previousSettings.codeFontFamily);
+        applyBaseFontSize(previousSettings.baseFontSize);
+        applyEditorFontSize(previousSettings.editorFontSize);
         void loadConfiguredFonts(previousSettings.fontFamily, previousSettings.codeFontFamily);
       }
 
@@ -203,6 +224,8 @@ export function SettingsContent({
       onAppearanceChange(newSettings.theme);
       applyFontFamily(newSettings.fontFamily);
       applyCodeFontFamily(newSettings.codeFontFamily);
+      applyBaseFontSize(newSettings.baseFontSize);
+      applyEditorFontSize(newSettings.editorFontSize);
       void loadConfiguredFonts(newSettings.fontFamily, newSettings.codeFontFamily);
       setEditedSettings(newSettings);
       saveMutation.mutate(newSettings);
@@ -214,9 +237,11 @@ export function SettingsContent({
     activeCategory === "agents" || activeCategory === "skills" || activeCategory === "rules";
   const shouldUseFormPagePadding =
     activeCategory === "general" ||
+    activeCategory === "editor" ||
     activeCategory === "connections" ||
     activeCategory === "models" ||
     activeCategory === "index" ||
+    activeCategory === "context" ||
     activeCategory === "agent-tools" ||
     activeCategory === "advanced";
   const isMobileListView = isMobile && mobileView === "list";
@@ -235,6 +260,7 @@ export function SettingsContent({
       };
 
       if (category === "general") removeQuery(["settings"]);
+      if (category === "editor") removeQuery(["settings"]);
       if (category === "connections") {
         removeQuery(["model-providers"]);
         removeQuery(["model-provider-catalog"]);
@@ -265,6 +291,9 @@ export function SettingsContent({
         removeQuery(["models"]);
         removeQuery(["model-providers"]);
         removeQuery(["model-provider-catalog"]);
+      }
+      if (category === "context") {
+        removeQuery(["settings"]);
       }
       if (category === "advanced") {
         removeQuery(["settings"]);
@@ -356,6 +385,7 @@ export function SettingsContent({
                 onSettingsChange={handleSettingsChange}
               />
             ) : null}
+            {activeCategory === "editor" ? <EditorSettings /> : null}
             {activeCategory === "connections" ? (
               <ConnectionsSettings
                 isAgentSettingsLocked={isAgentSettingsLocked}
@@ -376,6 +406,7 @@ export function SettingsContent({
                 isAgentSettingsLockLoading={isAgentSettingsLockLoading}
               />
             ) : null}
+            {activeCategory === "context" ? <ContextSettings /> : null}
             {activeCategory === "agent-tools" ? (
               <AgentToolsSettings
                 settings={displaySettings}

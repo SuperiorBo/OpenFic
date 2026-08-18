@@ -463,6 +463,11 @@ function normalizeTranscriptEvent(event: AgentEvent): AgentMessage | null {
             : event.content || i18n.t("assistant.toolApprovalRequiredFallback"),
         interrupt_behavior: payload.interrupt_behavior === "block" ? "block" : "cancel",
       },
+      interruptBatchId: typeof payload.batch_id === "string" ? payload.batch_id : undefined,
+      interruptBatchIndex:
+        typeof payload.batch_index === "number" ? payload.batch_index : undefined,
+      interruptBatchTotal:
+        typeof payload.batch_total === "number" ? payload.batch_total : undefined,
     };
   }
   if (event.type === "question") {
@@ -470,6 +475,11 @@ function normalizeTranscriptEvent(event: AgentEvent): AgentMessage | null {
       ...base,
       type: "question",
       questions: normalizeClarificationQuestions(payload.questions),
+      interruptBatchId: typeof payload.batch_id === "string" ? payload.batch_id : undefined,
+      interruptBatchIndex:
+        typeof payload.batch_index === "number" ? payload.batch_index : undefined,
+      interruptBatchTotal:
+        typeof payload.batch_total === "number" ? payload.batch_total : undefined,
     };
   }
   if (event.type === "tool") {
@@ -677,13 +687,19 @@ export function applyAgentTranscriptEvent(
     }
 
     if (message.type === "question") {
+      const batchId = message.interruptBatchId;
       return {
         state: {
           ...state,
           messages: upsertTranscriptMessage(
             clearRetryMessages(
               stopStreamingReasoning(stopStreamingAssistantOutput(baseMessages)),
-            ).filter((item) => item.type !== "question" && item.type !== "clarification"),
+            ).filter(
+              (item) =>
+                item.type !== "clarification" &&
+                (item.type !== "question" ||
+                  (batchId !== undefined && item.interruptBatchId === batchId)),
+            ),
             message,
           ),
           status: "waiting_answer",
@@ -695,6 +711,10 @@ export function applyAgentTranscriptEvent(
     }
 
     if (message.type === "tool") {
+      const isInterruptPreview = message.payload?.is_interrupt_preview === true;
+      const shouldKeepRunning =
+        !isInterruptPreview &&
+        (message.status === "running" || message.isStreaming || state.status === "running");
       const nextMessages = upsertTranscriptStreamingMessage(
         clearRetryMessages(
           stopStreamingReasoning(stopStreamingAssistantOutput(baseMessages)),
@@ -708,10 +728,12 @@ export function applyAgentTranscriptEvent(
           status:
             message.status === "error"
               ? "running"
-              : message.status === "running" || message.isStreaming
-                ? "running"
-                : state.status,
-          isRunning: message.status === "running" || message.isStreaming ? true : state.isRunning,
+              : isInterruptPreview
+                ? "waiting_approval"
+                : shouldKeepRunning
+                  ? "running"
+                  : state.status,
+          isRunning: shouldKeepRunning,
           currentStage: stageText || state.currentStage,
         },
         message,

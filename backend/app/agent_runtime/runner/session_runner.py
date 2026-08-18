@@ -8,6 +8,7 @@ from langchain_core.messages import BaseMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command
+from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent_runtime.context import ContextBuildError, build_context_parts
@@ -31,14 +32,16 @@ from app.agent_runtime.persistence import (
 )
 from app.agent_runtime.persistence.model import AgentRunMessage
 from app.agent_runtime.revisions import begin_user_revision, finalize_revision_status
-from app.agent_runtime.runner.checkpointer import get_checkpointer
+from app.agent_runtime.runner.checkpointer import get_checkpointer, prune_thread_checkpoints
 from app.agent_runtime.runner.event_translator import EventTranslator
+from app.agent_runtime.runner.run_registry import get_agent_run_registry
 from app.agent_runtime.streaming.replay_buffer import get_agent_event_replay_buffer
 from app.agent_runtime.types import DEFAULT_AGENT_RECURSION_LIMIT
 from app.core.ids import generate_id
 from app.socket import emit
 from app.socket.handlers import agent_session_room
 from app.storage.database import _get_session_factory, create_session
+from app.storage.repos import revision_repo
 from app.storage.services import task_service
 
 _HELD_EVENT_SESSION_IDS: ContextVar[frozenset[str]] = ContextVar(
@@ -64,24 +67,43 @@ def _format_utc_iso_datetime(value: datetime | str | None) -> str:
 def _interrupt_payloads(state: object) -> list[dict[str, Any]]:
     tasks = getattr(state, "tasks", None) or []
     payloads: list[dict[str, Any]] = []
-    for task in tasks:
+    for task_index, task in enumerate(tasks):
         interrupts = getattr(task, "interrupts", None) or []
-        for interrupt_obj in interrupts:
+        for interrupt_index, interrupt_obj in enumerate(interrupts):
             value = getattr(interrupt_obj, "value", None)
             if not isinstance(value, dict):
                 continue
             payload = dict(value)
-            if payload.get("type") == "tool_approval":
-                interrupt_id = getattr(interrupt_obj, "id", None)
-                if (
-                    isinstance(interrupt_id, str)
-                    and interrupt_id
-                ):
-                    payload["interrupt_id"] = interrupt_id
+            interrupt_id = getattr(interrupt_obj, "id", None)
+            if isinstance(interrupt_id, str) and interrupt_id:
+                payload["interrupt_id"] = interrupt_id
+                payload_type = payload.get("type")
+                if payload_type == "tool_approval":
                     payload["approval_id"] = interrupt_id
                     payload["id"] = interrupt_id
+                elif payload_type == "ask_user":
+                    payload["action_id"] = interrupt_id
+                    payload["id"] = interrupt_id
+            payload["_interrupt_order"] = (
+                payload.get("tool_index")
+                if isinstance(payload.get("tool_index"), int)
+                else task_index * 100 + interrupt_index
+            )
             payloads.append(payload)
-    return payloads
+    ordered_payloads = sorted(
+        payloads,
+        key=lambda payload: int(payload.get("_interrupt_order") or 0),
+    )
+    for payload in ordered_payloads:
+        payload.pop("_interrupt_order", None)
+    return ordered_payloads
+
+
+def _interrupt_resume_id(payload: dict[str, Any]) -> str | None:
+    action_type = payload.get("action_type")
+    key = "approval_id" if action_type == "tool_approval" else "action_id"
+    value = payload.get(key)
+    return value if isinstance(value, str) and value else None
 
 
 class SessionRunner:
@@ -233,6 +255,12 @@ class SessionRunner:
             buffer.record_unlocked(name, payload)
             await emit(name, payload, room=self._room)
 
+    async def _emit_tool_result(self, payload: dict[str, Any]) -> None:
+        payload = {"session_id": self.session_id, **payload}
+        if self._persister is not None:
+            await self._persister.apply_tool_result(payload)
+        await self._emit_agent_event("agent:tool_result", payload)
+
     async def _emit_retry_event(self, payload: dict[str, Any]) -> None:
         retry_payload = dict(payload)
         retry_payload["session_id"] = self.session_id
@@ -284,6 +312,12 @@ class SessionRunner:
 
     async def _emit_pending_interrupts(self, state: object) -> None:
         interrupt_payloads = _interrupt_payloads(state)
+        batch_id = generate_id()
+        batch_total = len(interrupt_payloads)
+        for batch_index, interrupt_payload in enumerate(interrupt_payloads):
+            interrupt_payload["batch_id"] = batch_id
+            interrupt_payload["batch_index"] = batch_index
+            interrupt_payload["batch_total"] = batch_total
         for interrupt_payload in interrupt_payloads:
             preview_items = interrupt_payload.get("tool_result_previews")
             previewed_tool_call_ids: set[str] = set()
@@ -310,6 +344,8 @@ class SessionRunner:
                                 "tool": tool_name,
                                 "input": preview_item.get("args") or {},
                                 "output": preview,
+                                "is_preview": True,
+                                "is_interrupt_preview": True,
                             },
                         )
             if self._persister is not None:
@@ -334,11 +370,12 @@ class SessionRunner:
                         "tool": tool_name,
                         "input": interrupt_payload.get("args") or {},
                         "output": tool_result_preview,
+                        "is_preview": True,
+                        "is_interrupt_preview": True,
                     },
                 )
 
-        if interrupt_payloads:
-            interrupt_payload = interrupt_payloads[0]
+        for interrupt_payload in interrupt_payloads:
             await emit(
                 "agent:interrupt",
                 {
@@ -498,6 +535,7 @@ class SessionRunner:
         )
         return {
             "recursion_limit": DEFAULT_AGENT_RECURSION_LIMIT,
+            "max_concurrency": 10,
             "configurable": {
                 "thread_id": self.session_id,
                 "db_session": runtime_session,
@@ -506,6 +544,7 @@ class SessionRunner:
                 "node_event_sink": node_event_sink,
                 "retry_event_sink": self._emit_retry_event,
                 "agent_event_sink": self._emit_agent_event,
+                "tool_result_sink": self._emit_tool_result,
                 "compaction_usage_sink": self._emit_persisted_task_usage_events,
                 "inject_queue": self._inject_queue,
                 "inject_message_consumed_sink": self._mark_injected_user_message_sent,
@@ -866,6 +905,7 @@ class SessionRunner:
             raise
         finally:
             await runtime_session.close()
+            await self._prune_thread_checkpoints()
 
         # Check for interrupt after stream ends
         state = await graph.aget_state(
@@ -874,19 +914,29 @@ class SessionRunner:
         if state.next:
             status_session = await create_session()
             try:
-                await finalize_revision_status(status_session, revision.id, "interrupted")
+                finalized = await finalize_revision_status(
+                    status_session, revision.id, "interrupted"
+                )
                 await status_session.commit()
             finally:
                 await status_session.close()
+            if not finalized:
+                await self._clear_replay_session()
+                return
             await self._emit_pending_interrupts(state)
             await self._clear_replay_session()
         else:
             status_session = await create_session()
             try:
-                await finalize_revision_status(status_session, revision.id, "completed")
+                finalized = await finalize_revision_status(
+                    status_session, revision.id, "completed"
+                )
                 await status_session.commit()
             finally:
                 await status_session.close()
+            if not finalized:
+                await self._clear_replay_session()
+                return
             await emit(
                 "agent:done",
                 {
@@ -896,6 +946,27 @@ class SessionRunner:
                 room=self._room,
             )
             await self._clear_replay_session()
+
+    async def _prune_thread_checkpoints(self) -> None:
+        try:
+            session = await create_session()
+            try:
+                checkpointer = await get_checkpointer()
+                deleted_rows = await prune_thread_checkpoints(
+                    session,
+                    checkpointer,
+                    self.session_id,
+                )
+                if deleted_rows:
+                    logger.info(
+                        f"Pruned {deleted_rows} checkpoint rows for session {self.session_id}"
+                    )
+            finally:
+                await session.close()
+        except Exception:
+            logger.exception(
+                f"Failed to prune checkpoints for session {self.session_id}"
+            )
 
     async def inject_message(
         self,
@@ -1030,6 +1101,17 @@ class SessionRunner:
         self._cancelled_user_message_ids.clear()
         self._inject_queue = asyncio.Queue()
 
+    async def resume_interrupt_batch(
+        self, batch_id: str, responses: list[dict[str, Any]]
+    ) -> None:
+        await self.resume(
+            {
+                "action_type": "interrupt_batch",
+                "batch_id": batch_id,
+                "responses": responses,
+            }
+        )
+
     async def resume(self, payload: dict) -> None:
         graph = await self._get_graph()
         runtime_session = await create_session()
@@ -1055,19 +1137,81 @@ class SessionRunner:
             audit_context=audit_context,
         )
         self._cancel_event.clear()
+        # The cancel endpoint commits this status before it signals in-memory
+        # runners. Together with the registry guard, this stops a queued resume
+        # task from clearing the cancellation signal and reviving the checkpoint.
+        if await get_agent_run_registry().is_cancelled(self.session_id):
+            await runtime_session.close()
+            return
+        if revision_id:
+            revision = await revision_repo.get_by_id(runtime_session, revision_id)
+            if revision is not None and revision.status == "cancelled":
+                await runtime_session.close()
+                return
 
         reason: Literal["done", "cancelled", "error"] = "done"
         try:
             resume_value: dict[str, Any] | dict[str, dict[str, Any]] = payload
-            if payload.get("action_type") == "tool_approval":
+            if payload.get("action_type") == "interrupt_batch":
+                state = await graph.aget_state(
+                    {"configurable": {"thread_id": self.session_id}}
+                )
+                pending = _interrupt_payloads(state)
+                pending_by_id = {
+                    item["interrupt_id"]: item
+                    for item in pending
+                    if isinstance(item.get("interrupt_id"), str)
+                }
+                responses = payload.get("responses")
+                if not isinstance(responses, list) or not responses:
+                    raise ValueError("并行中断响应不能为空")
+                if any(
+                    not isinstance(response, dict)
+                    or response.get("interrupt_id") not in pending_by_id
+                    for response in responses
+                ):
+                    raise ValueError("存在无效或已处理的并行中断响应")
+                if set(response["interrupt_id"] for response in responses) != set(
+                    pending_by_id
+                ):
+                    raise ValueError("必须一次提交本批全部并行中断响应")
+                resume_value = {
+                    response["interrupt_id"]: response for response in responses
+                }
+            elif payload.get("action_type") == "tool_approval":
                 state = await graph.aget_state(
                     {"configurable": {"thread_id": self.session_id}}
                 )
                 interrupt_payloads = _interrupt_payloads(state)
-                if interrupt_payloads:
-                    resume_value = {
-                        interrupt_payloads[0]["approval_id"]: payload,
-                    }
+                resume_id = _interrupt_resume_id(payload)
+                matching = next(
+                    (
+                        item
+                        for item in interrupt_payloads
+                        if item.get("approval_id") == resume_id
+                    ),
+                    None,
+                )
+                if matching is None or not resume_id:
+                    raise ValueError("待恢复的工具审批不存在或已处理")
+                resume_value = {resume_id: payload}
+            elif payload.get("action_type") == "clarification":
+                state = await graph.aget_state(
+                    {"configurable": {"thread_id": self.session_id}}
+                )
+                interrupt_payloads = _interrupt_payloads(state)
+                resume_id = _interrupt_resume_id(payload)
+                matching = next(
+                    (
+                        item
+                        for item in interrupt_payloads
+                        if item.get("action_id") == resume_id
+                    ),
+                    None,
+                )
+                if matching is None or not resume_id:
+                    raise ValueError("待恢复的问题不存在或已处理")
+                resume_value = {resume_id: payload}
             async for event in graph.astream_events(
                 Command(resume=resume_value), config=config, version="v2"
             ):
@@ -1132,19 +1276,29 @@ class SessionRunner:
         if state.next:
             status_session = await create_session()
             try:
-                await finalize_revision_status(status_session, revision_id, "interrupted")
+                finalized = await finalize_revision_status(
+                    status_session, revision_id, "interrupted"
+                )
                 await status_session.commit()
             finally:
                 await status_session.close()
+            if not finalized:
+                await self._clear_replay_session()
+                return
             await self._emit_pending_interrupts(state)
             await self._clear_replay_session()
         else:
             status_session = await create_session()
             try:
-                await finalize_revision_status(status_session, revision_id, "completed")
+                finalized = await finalize_revision_status(
+                    status_session, revision_id, "completed"
+                )
                 await status_session.commit()
             finally:
                 await status_session.close()
+            if not finalized:
+                await self._clear_replay_session()
+                return
             await emit(
                 "agent:done",
                 {

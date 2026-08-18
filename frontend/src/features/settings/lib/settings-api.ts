@@ -28,6 +28,8 @@ export function transformSettings(raw: SettingsResponse): Settings {
     theme: raw.theme as Settings["theme"],
     fontFamily: getSupportedFontFamily(raw.font_family),
     codeFontFamily: getSupportedCodeFontFamily(raw.code_font_family || DEFAULT_CODE_FONT_FAMILY),
+    baseFontSize: raw.base_font_size ?? 14,
+    editorFontSize: raw.editor_font_size ?? 16,
     defaultModel: raw.default_model || "",
     lightModel: raw.light_model || "",
     defaultEmbeddingModel: raw.default_embedding_model || "",
@@ -44,6 +46,11 @@ export function transformSettings(raw: SettingsResponse): Settings {
       mode: item.mode,
     })),
     auditPersistDetails: raw.audit_persist_details ?? false,
+    compressSystemPrompts: raw.compress_system_prompts ?? false,
+    telemetryEnabled: raw.telemetry_enabled ?? true,
+    editorAutoIndent: raw.editor_auto_indent ?? true,
+    editorAutoConvertPunctuation: raw.editor_auto_convert_punctuation ?? false,
+    editorAutoPairSymbols: raw.editor_auto_pair_symbols ?? false,
   };
 }
 

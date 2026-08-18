@@ -2,13 +2,14 @@ import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { DesktopHeader } from "./components/header";
 import { DesktopNotices } from "./components/desktop-notices";
 import { BootPage } from "./pages/boot/page";
+import { DataManagementPage } from "./pages/data-management/page";
 import { FrontendPage } from "./pages/frontend/page";
 import { SetupPage } from "./pages/setup/page";
 import i18n, { isDesktopLanguage } from "./i18n";
 import type { DesktopConfig } from "../shared/config";
 import type { StartupProgressEvent, UpdateState } from "../shared/ipc";
 
-type ShellState = "booting" | "setup" | "frontend";
+type ShellState = "booting" | "setup" | "frontend" | "data";
 type Appearance = "light" | "dark";
 type SetupInitialStep = "mode" | "remote" | "local-directory" | "local-success";
 
@@ -173,9 +174,12 @@ export function App() {
   const [frontendReadyPartition, setFrontendReadyPartition] = useState<string | null>(null);
   const [shellAppearance, setShellAppearance] = useState<ShellAppearance>({ appearance: "light" });
   const [compatibilityWarning, setCompatibilityWarning] = useState<string | null>(null);
+  const [maintenanceWarning, setMaintenanceWarning] = useState<string | null>(null);
   const [updateState, setUpdateState] = useState<UpdateState>({ status: "idle" });
   const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
   const [instancePanelOpen, setInstancePanelOpen] = useState(false);
+  const [dataManagementPrevState, setDataManagementPrevState] = useState<ShellState | null>(null);
+  const [dataManagementInstanceId, setDataManagementInstanceId] = useState<string | null>(null);
   const [startupProgress, setStartupProgress] = useState<StartupProgressEvent | null>(null);
   const [frontendWebview, setFrontendWebview] = useState<HTMLElement | null>(null);
   const lastAutoUpdateCheck = useRef<string | null>(null);
@@ -203,6 +207,12 @@ export function App() {
         setActiveInstanceId(result.activeInstanceId ?? nextConfig?.activeInstanceId ?? null);
         setError(result.message ?? null);
         setCompatibilityWarning(result.compatibilityWarning ?? null);
+        const maintenanceWarning = result.maintenanceWarning ?? null;
+        setMaintenanceWarning(maintenanceWarning);
+        if (maintenanceWarning) {
+          setShellState("booting");
+          return;
+        }
         setShellState(result.status === "ready" ? "frontend" : "setup");
       } catch (err) {
         if (cancelled || requestId !== startupRequestId.current) return;
@@ -349,12 +359,47 @@ export function App() {
     setShellState("frontend");
   };
 
+  const enterFrontend = (requestId?: number) => {
+    if (requestId !== undefined && requestId !== startupRequestId.current) return;
+    setMaintenanceWarning(null);
+    void showFrontend(undefined, requestId);
+  };
+
+  const handleAcknowledgeMaintenance = (requestId?: number) => {
+    enterFrontend(requestId);
+  };
+
   const handleShowSetup = (target: SetupInitialStep = "mode") => {
     setError(null);
     setSetupInitialStep(target);
     setSetupInitialInstallDir(null);
     setSetupInitialRemoteUrl(null);
     setShellState("setup");
+  };
+
+  const handleOpenDataManagement = () => {
+    setError(null);
+    setDataManagementPrevState(shellState);
+    setDataManagementInstanceId(shellState === "frontend" ? activeInstanceId : null);
+    setShellState("data");
+  };
+
+  const handleOpenDataManagementFor = (instanceId: string) => {
+    setError(null);
+    setDataManagementPrevState(shellState);
+    setDataManagementInstanceId(instanceId);
+    setShellState("data");
+  };
+
+  const handleCloseDataManagement = async () => {
+    const prevState = dataManagementPrevState ?? "frontend";
+    setDataManagementPrevState(null);
+    setDataManagementInstanceId(null);
+    if (prevState === "frontend" && activeInstance?.mode === "local") {
+      await handleSwitchInstance(activeInstance.id);
+      return;
+    }
+    setShellState(prevState);
   };
 
   const handleAddInstance = () => {
@@ -366,6 +411,7 @@ export function App() {
     const requestId = ++startupRequestId.current;
     setError(null);
     setCompatibilityWarning(null);
+    setMaintenanceWarning(null);
     setUpdateDialogOpen(false);
     setStartupProgress(null);
     setShellState("booting");
@@ -375,6 +421,10 @@ export function App() {
       if (requestId !== startupRequestId.current) return;
       setActiveInstanceId(result.activeInstanceId ?? nextConfig?.activeInstanceId ?? instanceId);
       setCompatibilityWarning(result.compatibilityWarning ?? null);
+      if (result.maintenanceWarning) {
+        setMaintenanceWarning(result.maintenanceWarning);
+        return;
+      }
       setWebviewKey((key) => key + 1);
       setShellState(result.status === "ready" ? "frontend" : "setup");
     } catch (err) {
@@ -389,6 +439,7 @@ export function App() {
     await window.openficDesktop.cancelStartup();
     const nextConfig = await window.openficDesktop.getConfig();
     setError(null);
+    setMaintenanceWarning(null);
     setConfig(nextConfig);
     setActiveInstanceId(nextConfig?.activeInstanceId ?? null);
     setStartupProgress(null);
@@ -418,6 +469,7 @@ export function App() {
         remoteUrl: normalizedUrl,
         autoStartLocal: false,
         installDir: null,
+        dataDir: null,
       };
       const nextConfig: DesktopConfig = {
         activeInstanceId: previousConfig?.activeInstanceId ?? null,
@@ -438,7 +490,7 @@ export function App() {
     }
   };
 
-  const handleStartLocal = async (installDir: string) => {
+  const handleStartLocal = async (installDir: string, dataDir: string) => {
     const requestId = ++startupRequestId.current;
     setError(null);
     setCompatibilityWarning(null);
@@ -447,8 +499,12 @@ export function App() {
     setStartupProgress(null);
     setShellState("booting");
     try {
-      await window.openficDesktop.startLocalBackend(installDir);
+      const maintenanceWarning = await window.openficDesktop.startLocalBackend(installDir, dataDir);
       if (requestId !== startupRequestId.current) return;
+      if (maintenanceWarning) {
+        setMaintenanceWarning(maintenanceWarning);
+        return;
+      }
       await showFrontend(undefined, requestId);
     } catch (err) {
       if (requestId !== startupRequestId.current) return;
@@ -524,6 +580,7 @@ export function App() {
         disabled={shellState === "booting"}
         onAddInstance={handleAddInstance}
         onOpenSetup={() => handleShowSetup()}
+        onOpenDataManagement={handleOpenDataManagement}
         onSaveConfig={handleSaveConfig}
         onSwitchInstance={handleSwitchInstance}
         instancePanelOpen={instancePanelOpen}
@@ -543,7 +600,13 @@ export function App() {
       />
       <section className="desktop-content">
         {shellState === "booting" ? (
-          <BootPage error={error} progress={startupProgress} onCancel={() => void handleCancelStartup()} />
+          <BootPage
+            error={error}
+            progress={startupProgress}
+            maintenanceWarning={maintenanceWarning}
+            onCancel={() => void handleCancelStartup()}
+            onAcknowledgeMaintenance={() => handleAcknowledgeMaintenance()}
+          />
         ) : null}
         {shellState === "setup" ? (
           <SetupPage
@@ -556,11 +619,22 @@ export function App() {
             onClearError={() => setError(null)}
             onConnectRemote={(url) => void handleConnectRemote(url)}
             onConnectInstance={(instanceId) => void handleSwitchInstance(instanceId)}
-            onStartLocal={(installDir) => void handleStartLocal(installDir)}
+            onOpenDataManagementFor={handleOpenDataManagementFor}
+            onStartLocal={(installDir, dataDir) => void handleStartLocal(installDir, dataDir)}
           />
         ) : null}
         {shellState === "frontend" && frontendReadyPartition ? (
           <FrontendPage webviewKey={webviewKey} partition={frontendReadyPartition} webviewRef={setFrontendWebview} />
+        ) : null}
+        {shellState === "data" ? (
+          <DataManagementPage
+            instanceId={dataManagementInstanceId}
+            instances={config?.instances ?? []}
+            backendRunning={dataManagementPrevState === "frontend"}
+            onSelectInstance={setDataManagementInstanceId}
+            onClose={handleCloseDataManagement}
+            onConfigChanged={() => void refreshConfig()}
+          />
         ) : null}
       </section>
       <DesktopNotices

@@ -31,12 +31,22 @@ export const IpcChannels = {
   updateState: "update:state",
   exportLogs: "logs:export",
   logFrontendDiagnostic: "logs:frontend-diagnostic",
+  reportError: "telemetry:report-error",
   openProjectHome: "help:open-project-home",
   reportBug: "help:report-bug",
   suggestFeature: "help:suggest-feature",
   getZoomFactor: "zoom:get-factor",
   saveZoomFactor: "zoom:save-factor",
   zoomFactorChanged: "zoom:changed",
+  getDefaultDataDir: "data:get-default-dir",
+  getDataInfo: "data:get-info",
+  inspectDataDir: "data:inspect-dir",
+  migrateData: "data:migrate",
+  backupData: "data:backup",
+  restoreData: "data:restore",
+  dataProgress: "data:progress",
+  selectSaveFile: "dialog:select-save-file",
+  selectOpenFile: "dialog:select-open-file",
 } as const;
 
 export type SetupStep =
@@ -66,6 +76,12 @@ export interface LogFrontendDiagnosticRequest {
   message: string;
 }
 
+export interface ReportErrorPayload {
+  name: string;
+  message: string;
+  stack?: string;
+}
+
 export interface EnsureInstanceSessionRequest {
   partition: string;
 }
@@ -88,6 +104,7 @@ export interface InstallRuntimeRequest {
 
 export interface StartLocalBackendRequest {
   installDir: string;
+  dataDir?: string | null;
 }
 
 export interface InspectLocalRuntimeRequest {
@@ -105,6 +122,7 @@ export interface InitializeAppResult {
   activeInstanceId?: string | null;
   message?: string;
   compatibilityWarning?: string;
+  maintenanceWarning?: string;
 }
 
 export type StartupStep =
@@ -117,6 +135,7 @@ export type StartupStep =
   | "initialize-database"
   | "complete-backend-startup"
   | "check-health"
+  | "maintain-database"
   | "connect-remote"
   | "verify-remote"
   | "check-compatibility"
@@ -129,6 +148,27 @@ export interface StartupProgressEvent {
   message: string;
   /** Overall startup progress as a 0..1 fraction. */
   progress: number;
+  /** Whether the current operation has no reliable percentage. */
+  indeterminate?: boolean;
+  /** Backend maintenance phase used to localize the current detail. */
+  maintenancePhase?:
+    | "pending"
+    | "pruning"
+    | "migrating"
+    | "vacuuming"
+    | "cleanup"
+    | "ready"
+    | "failed";
+  /** Backend maintenance internal progress (0..1), shown as text detail. */
+  maintenanceProgress?: number | null;
+  /** Backend maintenance reclaimed bytes (current), shown as text detail. */
+  maintenanceReclaimedBytes?: number | null;
+  /** Backend maintenance estimated total bytes, shown as text detail. */
+  maintenanceTotalBytes?: number | null;
+  /** Backend maintenance VACUUM VM operations, shown as text detail. */
+  maintenanceVmOps?: number | null;
+  /** Backend maintenance elapsed seconds, shown as text detail. */
+  maintenanceElapsedSeconds?: number | null;
 }
 
 export type UpdateStatus = "unsupported" | "idle" | "checking" | "available" | "downloading" | "downloaded" | "not-available" | "error";
@@ -142,4 +182,61 @@ export interface UpdateState {
   total?: number;
   bytesPerSecond?: number;
   message?: string;
+}
+
+export interface DataInfo {
+  /** Resolved absolute path of the instance data directory. */
+  dataDir: string;
+  /** Whether the instance falls back to the default data location. */
+  isDefaultLocation: boolean;
+  hasData: boolean;
+  entryCount: number;
+  sizeBytes: number;
+}
+
+export interface InspectDataDirResult {
+  /** Whether the directory contains recognizable OpenFic data. */
+  valid: boolean;
+  hasData: boolean;
+  entryCount: number;
+  sizeBytes: number;
+}
+
+export interface GetDataInfoRequest {
+  instanceId: string;
+}
+
+export interface InspectDataDirRequest {
+  dataDir: string;
+}
+
+export interface MigrateDataRequest {
+  instanceId: string;
+  newDataDir: string;
+  deleteOldDir: boolean;
+}
+
+export interface MigrateDataResult {
+  dataDir: string;
+  migrated: boolean;
+  removedOldDir: boolean;
+}
+
+export interface BackupDataRequest {
+  instanceId: string;
+  targetPath: string;
+}
+
+export interface RestoreDataRequest {
+  instanceId: string;
+  sourcePath: string;
+}
+
+export type DataOperationPhase = "extract" | "verify" | "rollback" | "copy" | "cleanup" | "pack" | "delete-old";
+
+export interface DataProgressEvent {
+  operation: "backup" | "restore" | "migrate";
+  phase: DataOperationPhase;
+  /** Overall progress of the current phase as a 0..1 fraction when available. */
+  progress?: number;
 }

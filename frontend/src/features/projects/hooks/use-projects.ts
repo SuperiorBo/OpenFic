@@ -4,10 +4,10 @@
  * 使用 TanStack Query 管理项目数据的异步状态。
  */
 
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 
 import { fetchProjects, createProject, updateProject, deleteProject } from "@/lib/api-client";
-import { removeRecentProjectByProjectId } from "@/lib/local-db";
+import { deleteAgentInputHistory, removeRecentProjectByProjectId } from "@/lib/local-db";
 import type { ProjectCreate, ProjectUpdate, ProjectListParams } from "@/lib/project.types";
 import type { RecentProject } from "@/lib/recent-projects";
 
@@ -21,6 +21,7 @@ export function useProjects(params?: ProjectListParams) {
   return useQuery({
     queryKey: [...projectsQueryKey, params],
     queryFn: () => fetchProjects(params),
+    placeholderData: keepPreviousData,
   });
 }
 
@@ -63,7 +64,10 @@ export function useDeleteProject() {
     mutationFn: (projectId: string) => deleteProject(projectId),
     onSuccess: async (_data, projectId) => {
       await queryClient.cancelQueries({ queryKey: ["recent-projects"] });
-      await removeRecentProjectByProjectId(projectId);
+      await Promise.all([
+        removeRecentProjectByProjectId(projectId),
+        deleteAgentInputHistory(projectId),
+      ]);
       queryClient.setQueryData<RecentProject[]>(["recent-projects"], (recentProjects) =>
         recentProjects?.filter((project) => project.projectId !== projectId),
       );

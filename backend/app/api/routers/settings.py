@@ -15,7 +15,11 @@ from app.agent_runtime.tools.permission_metadata import (
     SETTING_KEY_AGENT_TOOL_PERMISSIONS,
     get_default_agent_tool_permissions,
 )
+from app.agent_runtime.context.processors.compress import (
+    SETTING_KEY_COMPRESS_SYSTEM_PROMPTS,
+)
 from app.agent_runtime.session_activity import has_active_agent_sessions
+from app.telemetry import SETTING_KEY_TELEMETRY_ENABLED, set_telemetry_enabled
 from app.api.agent_settings_lock import require_agent_settings_unlocked
 from app.api.schemas.setting import (
     AgentSettingsLockResponse,
@@ -62,16 +66,25 @@ SETTING_KEY_LANGUAGE = "language"
 SETTING_KEY_THEME = "theme"
 SETTING_KEY_FONT_FAMILY = "font_family"
 SETTING_KEY_CODE_FONT_FAMILY = "code_font_family"
+SETTING_KEY_BASE_FONT_SIZE = "base_font_size"
+SETTING_KEY_EDITOR_FONT_SIZE = "editor_font_size"
+DEFAULT_BASE_FONT_SIZE = 14
+DEFAULT_EDITOR_FONT_SIZE = 16
 SETTING_KEY_DEFAULT_MODEL = "default_model"
 SETTING_KEY_LIGHT_MODEL = "light_model"
 SETTING_KEY_DEFAULT_EMBEDDING_MODEL = "default_embedding_model"
 SETTING_KEY_AUDIT_PERSIST_DETAILS = AUDIT_DETAILS_PERSISTENCE_SETTING_KEY
+SETTING_KEY_EDITOR_AUTO_INDENT = "editor_auto_indent"
+SETTING_KEY_EDITOR_AUTO_CONVERT_PUNCTUATION = "editor_auto_convert_punctuation"
+SETTING_KEY_EDITOR_AUTO_PAIR_SYMBOLS = "editor_auto_pair_symbols"
 # 默认值
 DEFAULT_SETTINGS = {
     SETTING_KEY_LANGUAGE: "zh-CN",
     SETTING_KEY_THEME: "light",
-    SETTING_KEY_FONT_FAMILY: "SourceHanSerifCN-VF",
-    SETTING_KEY_CODE_FONT_FAMILY: "JetBrainsMapleMono",
+    SETTING_KEY_FONT_FAMILY: "system-ui",
+    SETTING_KEY_CODE_FONT_FAMILY: "ui-monospace",
+    SETTING_KEY_BASE_FONT_SIZE: "14",
+    SETTING_KEY_EDITOR_FONT_SIZE: "16",
     SETTING_KEY_DEFAULT_MODEL: "",
     SETTING_KEY_LIGHT_MODEL: "",
     SETTING_KEY_DEFAULT_EMBEDDING_MODEL: "",
@@ -87,6 +100,11 @@ DEFAULT_SETTINGS = {
     SETTING_KEY_AGENT_BYPASS_TOOL_APPROVAL: "false",
     SETTING_KEY_AGENT_TOOL_PERMISSIONS: "[]",
     SETTING_KEY_AUDIT_PERSIST_DETAILS: "false",
+    SETTING_KEY_COMPRESS_SYSTEM_PROMPTS: "false",
+    SETTING_KEY_TELEMETRY_ENABLED: "true",
+    SETTING_KEY_EDITOR_AUTO_INDENT: "true",
+    SETTING_KEY_EDITOR_AUTO_CONVERT_PUNCTUATION: "false",
+    SETTING_KEY_EDITOR_AUTO_PAIR_SYMBOLS: "false",
 }
 
 
@@ -236,8 +254,22 @@ async def get_settings(
         font_family=settings_dict.get(
             SETTING_KEY_FONT_FAMILY, DEFAULT_SETTINGS[SETTING_KEY_FONT_FAMILY]
         ),
-        code_font_family=settings_dict.get(
+code_font_family=settings_dict.get(
             SETTING_KEY_CODE_FONT_FAMILY, DEFAULT_SETTINGS[SETTING_KEY_CODE_FONT_FAMILY]
+        ),
+        base_font_size=_parse_int_setting(
+            settings_dict.get(
+                SETTING_KEY_BASE_FONT_SIZE,
+                DEFAULT_SETTINGS[SETTING_KEY_BASE_FONT_SIZE],
+            ),
+            default=DEFAULT_BASE_FONT_SIZE,
+        ),
+        editor_font_size=_parse_int_setting(
+            settings_dict.get(
+                SETTING_KEY_EDITOR_FONT_SIZE,
+                DEFAULT_SETTINGS[SETTING_KEY_EDITOR_FONT_SIZE],
+            ),
+            default=DEFAULT_EDITOR_FONT_SIZE,
         ),
         default_model=settings_dict.get(
             SETTING_KEY_DEFAULT_MODEL, DEFAULT_SETTINGS[SETTING_KEY_DEFAULT_MODEL]
@@ -304,6 +336,41 @@ async def get_settings(
             ),
             default=False,
         ),
+        compress_system_prompts=_parse_bool_setting(
+            settings_dict.get(
+                SETTING_KEY_COMPRESS_SYSTEM_PROMPTS,
+                DEFAULT_SETTINGS[SETTING_KEY_COMPRESS_SYSTEM_PROMPTS],
+            ),
+            default=False,
+        ),
+        telemetry_enabled=_parse_bool_setting(
+            settings_dict.get(
+                SETTING_KEY_TELEMETRY_ENABLED,
+                DEFAULT_SETTINGS[SETTING_KEY_TELEMETRY_ENABLED],
+            ),
+            default=True,
+        ),
+        editor_auto_indent=_parse_bool_setting(
+            settings_dict.get(
+                SETTING_KEY_EDITOR_AUTO_INDENT,
+                DEFAULT_SETTINGS[SETTING_KEY_EDITOR_AUTO_INDENT],
+            ),
+            default=True,
+        ),
+        editor_auto_convert_punctuation=_parse_bool_setting(
+            settings_dict.get(
+                SETTING_KEY_EDITOR_AUTO_CONVERT_PUNCTUATION,
+                DEFAULT_SETTINGS[SETTING_KEY_EDITOR_AUTO_CONVERT_PUNCTUATION],
+            ),
+            default=False,
+        ),
+        editor_auto_pair_symbols=_parse_bool_setting(
+            settings_dict.get(
+                SETTING_KEY_EDITOR_AUTO_PAIR_SYMBOLS,
+                DEFAULT_SETTINGS[SETTING_KEY_EDITOR_AUTO_PAIR_SYMBOLS],
+            ),
+            default=False,
+        ),
     )
 
 
@@ -351,8 +418,6 @@ async def update_settings(
     if is_restricted_update:
         await require_agent_settings_unlocked(session)
 
-    logger.info(f"更新设置: {request}")
-
     settings_list = await setting_repo.get_all(session)
     current_settings = {setting.key: setting.value for setting in settings_list}
 
@@ -370,6 +435,10 @@ async def update_settings(
         settings_to_update[SETTING_KEY_FONT_FAMILY] = request.font_family
     if request.code_font_family is not None:
         settings_to_update[SETTING_KEY_CODE_FONT_FAMILY] = request.code_font_family
+    if request.base_font_size is not None:
+        settings_to_update[SETTING_KEY_BASE_FONT_SIZE] = str(max(1, request.base_font_size))
+    if request.editor_font_size is not None:
+        settings_to_update[SETTING_KEY_EDITOR_FONT_SIZE] = str(max(1, request.editor_font_size))
     if request.default_model is not None:
         settings_to_update[SETTING_KEY_DEFAULT_MODEL] = request.default_model
     if request.light_model is not None:
@@ -459,6 +528,31 @@ async def update_settings(
             ensure_ascii=False,
         )
         next_audit_details_persistence = request.audit_persist_details
+    if request.compress_system_prompts is not None:
+        settings_to_update[SETTING_KEY_COMPRESS_SYSTEM_PROMPTS] = json.dumps(
+            request.compress_system_prompts,
+            ensure_ascii=False,
+        )
+    if request.telemetry_enabled is not None:
+        settings_to_update[SETTING_KEY_TELEMETRY_ENABLED] = json.dumps(
+            request.telemetry_enabled,
+            ensure_ascii=False,
+        )
+    if request.editor_auto_indent is not None:
+        settings_to_update[SETTING_KEY_EDITOR_AUTO_INDENT] = json.dumps(
+            request.editor_auto_indent,
+            ensure_ascii=False,
+        )
+    if request.editor_auto_convert_punctuation is not None:
+        settings_to_update[SETTING_KEY_EDITOR_AUTO_CONVERT_PUNCTUATION] = json.dumps(
+            request.editor_auto_convert_punctuation,
+            ensure_ascii=False,
+        )
+    if request.editor_auto_pair_symbols is not None:
+        settings_to_update[SETTING_KEY_EDITOR_AUTO_PAIR_SYMBOLS] = json.dumps(
+            request.editor_auto_pair_symbols,
+            ensure_ascii=False,
+        )
 
     # 分块参数或嵌入模型变更会使现有索引失效，需要标记重建。
     if index_contract_changed:
@@ -470,6 +564,8 @@ async def update_settings(
         await setting_repo.bulk_upsert(session, settings_to_update)
     if next_audit_details_persistence is not None:
         set_audit_details_persistence(next_audit_details_persistence)
+    if request.telemetry_enabled is not None:
+        set_telemetry_enabled(request.telemetry_enabled)
 
     # 索引配置变更后通知前端刷新索引状态。
     if index_config_changed:

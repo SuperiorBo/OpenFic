@@ -184,6 +184,87 @@ async def test_persister_inserts_missing_batch_approval_preview_tool_messages(
 
 
 @pytest.mark.asyncio
+async def test_persister_persists_ask_user_interrupt_preview(
+    db_session: AsyncSession, db_session_factory, sample_task
+):
+    session_id = "session-ask-user-preview"
+    questions = [{"title": "剧情走向？", "description": "请选择下一段方向", "options": []}]
+    persister = MessagePersister(
+        session_id=session_id,
+        task_id=sample_task.id,
+        project_id=sample_task.project_id,
+        db_session_factory=db_session_factory,
+    )
+
+    await persister.apply_interrupt_preview(
+        {
+            "type": "ask_user",
+            "tool_call_id": "call-ask",
+            "tool_name": "ask_user",
+            "args": {"questions": questions},
+            "questions": questions,
+        }
+    )
+
+    messages = await repo.list_by_session(db_session, session_id)
+    assert len(messages) == 1
+    assert messages[0].tool_call_id == "call-ask"
+    assert messages[0].tool_name == "ask_user"
+    assert json.loads(messages[0].content) == {
+        "type": "preview",
+        "success": True,
+        "reason": "ask_user_pending",
+        "questions": questions,
+    }
+
+
+@pytest.mark.asyncio
+async def test_persister_replaces_approval_preview_with_rejected_result(
+    db_session: AsyncSession, db_session_factory, sample_task
+):
+    session_id = "session-rejected-approval"
+    persister = MessagePersister(
+        session_id=session_id,
+        task_id=sample_task.id,
+        project_id=sample_task.project_id,
+        db_session_factory=db_session_factory,
+    )
+    await persister.apply_interrupt_preview(
+        {
+            "tool_call_id": "call-rejected",
+            "tool_name": "edit_note",
+            "tool_result_preview": {
+                "type": "preview",
+                "success": True,
+                "reason": "approval_preview",
+            },
+        }
+    )
+
+    await persister.apply_tool_result(
+        {
+            "tool_call_id": "call-rejected",
+            "tool_name": "edit_note",
+            "output": {
+                "type": "fail",
+                "success": False,
+                "reason": "tool_error",
+                "error": "工具调用已被用户拒绝",
+            },
+        }
+    )
+
+    messages = await repo.list_by_session(db_session, session_id)
+    assert len(messages) == 1
+    assert json.loads(messages[0].content) == {
+        "type": "fail",
+        "success": False,
+        "reason": "tool_error",
+        "error": "工具调用已被用户拒绝",
+    }
+
+
+@pytest.mark.asyncio
 async def test_persister_ignores_subagent_child_events(
     db_session: AsyncSession, db_session_factory, sample_task
 ):

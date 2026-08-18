@@ -7,6 +7,7 @@ from app.agent_runtime.context.parts.history import build_history
 from app.agent_runtime.context.parts.rules import build_rules
 from app.agent_runtime.context.parts.skills import build_skills
 from app.agent_runtime.context.parts.system_prompt import build_system_prompt
+from app.agent_runtime.context.processors.compress import compress_system_prompts_if_enabled
 from app.agent_runtime.context.processors.filter import (
     filter_invalid,
     filter_tool_result_metadata,
@@ -42,7 +43,7 @@ async def build_context_parts(
     parts: list[ContextMessage] = []
     if prompt_messages := await build_system_prompt(state, agent_name, db_session):
         parts.extend(prompt_messages)
-    if (m := await build_rules(db_session)) is not None:
+    if (m := await build_rules(db_session, state.get("project_id"))) is not None:
         parts.append(m)
     if (m := await build_skills(state, agent_name, db_session)) is not None:
         parts.append(m)
@@ -60,7 +61,9 @@ async def build_context_parts(
             cause=e,
         ) from e
     overlaid_history = apply_compaction_overlay(history, compactions)
-    return static + overlaid_history
+    result = static + overlaid_history
+    result = await compress_system_prompts_if_enabled(result, db_session)
+    return result
 
 
 def _is_history(message: ContextMessage) -> bool:

@@ -10,6 +10,7 @@ interface DesktopHeaderProps {
   disabled: boolean;
   onAddInstance: () => void;
   onOpenSetup: () => void;
+  onOpenDataManagement: () => void;
   onSaveConfig: (config: DesktopConfig) => Promise<void>;
   onSwitchInstance: (instanceId: string) => Promise<void>;
   instancePanelOpen: boolean;
@@ -99,6 +100,7 @@ export function DesktopHeader({
   disabled,
   onAddInstance,
   onOpenSetup,
+  onOpenDataManagement,
   onSaveConfig,
   onSwitchInstance,
   instancePanelOpen,
@@ -230,6 +232,12 @@ export function DesktopHeader({
     onInstancePanelOpenChange(false);
     setOpenMenu(null);
     onOpenSetup();
+  };
+
+  const handleOpenDataManagement = () => {
+    onInstancePanelOpenChange(false);
+    setOpenMenu(null);
+    onOpenDataManagement();
   };
 
   const toggleFavorite = async (event: MouseEvent<HTMLButtonElement>, instance: DesktopInstance) => {
@@ -468,6 +476,15 @@ export function DesktopHeader({
                 </button>
                 <button className="desktop-menu-item" type="button" role="menuitem" disabled={disabled} onClick={handleOpenSetup}>
                   {t("desktop.header.manageInstances")}
+                </button>
+                <button
+                  className="desktop-menu-item"
+                  type="button"
+                  role="menuitem"
+                  disabled={disabled}
+                  onClick={handleOpenDataManagement}
+                >
+                  {t("desktop.header.dataManagement")}
                 </button>
               </div>
             ) : null}

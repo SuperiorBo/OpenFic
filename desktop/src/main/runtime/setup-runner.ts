@@ -97,7 +97,8 @@ export async function startLocalBackendFromInstall(
   installDir: string,
   startupProgress?: StartupProgressTracker,
   signal?: AbortSignal,
-): Promise<BackendProcessHandle> {
+  dataDir?: string,
+): Promise<{ handle: BackendProcessHandle; maintenanceError: string | null }> {
   throwIfAborted(signal);
   const inspection = await inspectLocalRuntime(installDir);
   if (inspection.status !== "ready") {
@@ -105,5 +106,5 @@ export async function startLocalBackendFromInstall(
   }
   throwIfAborted(signal);
   const runtimeDir = resolveRuntimeDir(installDir);
-  return startLocalOpenFicBackend(resolveVenvPythonPath(runtimeDir), app.getVersion(), startupProgress, signal);
+  return startLocalOpenFicBackend(resolveVenvPythonPath(runtimeDir), app.getVersion(), startupProgress, signal, dataDir);
 }

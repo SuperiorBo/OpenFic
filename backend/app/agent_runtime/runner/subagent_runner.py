@@ -8,6 +8,7 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langgraph.types import Command
+from loguru import logger
 
 from app.agent_runtime.agents.definitions import (
     AgentDefinition,
@@ -29,7 +30,7 @@ from app.agent_runtime.persistence.child_runs import (
 )
 from app.agent_runtime.persistence.loader import load_history
 from app.agent_runtime.persistence.model import AgentChildRun, AgentChildRunRequest
-from app.agent_runtime.runner.checkpointer import get_checkpointer
+from app.agent_runtime.runner.checkpointer import get_checkpointer, prune_thread_checkpoints
 from app.agent_runtime.runner.event_translator import EventTranslator
 from app.agent_runtime.runner.event_scope import SUBAGENT_CHILD_EVENT_TAG
 from app.agent_runtime.runner.run_registry import get_agent_run_registry
@@ -212,6 +213,13 @@ def _interrupt_id(interrupt_obj: Any, value: dict[str, Any]) -> str:
     if isinstance(raw_id, str) and raw_id:
         return raw_id
     return "child-approval"
+
+
+def _interrupt_resume_id(payload: dict[str, Any]) -> str | None:
+    action_type = payload.get("action_type")
+    key = "approval_id" if action_type == "tool_approval" else "action_id"
+    value = payload.get(key)
+    return value if isinstance(value, str) and value else None
 
 
 def _last_assistant_content(messages: list[BaseMessage]) -> str | None:
@@ -404,6 +412,7 @@ class SubagentRunner:
                 graph_input,
                 config={
                     "recursion_limit": DEFAULT_AGENT_RECURSION_LIMIT,
+                    "max_concurrency": 10,
                     "tags": [SUBAGENT_CHILD_EVENT_TAG],
                     "configurable": {
                         "thread_id": row.child_thread_id,
@@ -468,6 +477,28 @@ class SubagentRunner:
             raise
         finally:
             await _close_session(runtime_session)
+            await self._prune_child_thread_checkpoints(row.child_thread_id)
+
+    async def _prune_child_thread_checkpoints(self, child_thread_id: str) -> None:
+        try:
+            session = await _open_session(self.session_factory)
+            try:
+                checkpointer = await get_checkpointer()
+                deleted_rows = await prune_thread_checkpoints(
+                    session,
+                    checkpointer,
+                    child_thread_id,
+                )
+                if deleted_rows:
+                    logger.info(
+                        f"Pruned {deleted_rows} checkpoint rows for child thread {child_thread_id}"
+                    )
+            finally:
+                await _close_session(session)
+        except Exception:
+            logger.exception(
+                f"Failed to prune checkpoints for child thread {child_thread_id}"
+            )
 
     def _make_child_persister(self, row: AgentChildRun) -> MessagePersister:
         factory = self.session_factory or _get_session_factory()
@@ -820,6 +851,8 @@ class SubagentRunner:
             "agent_key": row.agent_key,
             "dispatch_id": row.dispatch_id,
         }
+        if value.get("type") == "ask_user":
+            approval_request["action_id"] = approval_id
         session = await _open_session(self.session_factory)
         try:
             updated_row = await record_child_run_pending_approval(
@@ -941,7 +974,8 @@ class SubagentRunner:
             approval_request = pending_result.get("approval_request")
             if isinstance(approval_request, dict) and approval_request:
                 await self._emit_child_interrupt(row, approval_request)
-            return pending_result
+                return pending_result
+            return {"error": "subagent interrupt payload missing"}
 
         assistant_content = _last_assistant_content(result_state.get("messages") or [])
         if assistant_content is None:
@@ -1061,6 +1095,7 @@ class SubagentRunner:
                 parent_session_id=parent_session_id,
                 child_run_id=child_run_id,
                 runner=self,
+                clear_cancelled=False,
             )
             return
 

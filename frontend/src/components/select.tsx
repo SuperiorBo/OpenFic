@@ -7,7 +7,7 @@
 
 import { Box, Button, Flex, Popover, ScrollArea, Select, Text, TextField } from "@radix-ui/themes";
 import { ChevronDown, Search } from "lucide-react";
-import { useMemo, useState } from "react";
+import { Fragment, useMemo, useState } from "react";
 import type { CSSProperties, ReactNode, ComponentProps } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -20,7 +20,78 @@ export interface SelectOption {
   label: string;
   prefix?: ReactNode;
   suffix?: ReactNode;
+  description?: string;
+  labelColor?: string;
+  fontFamily?: string;
   disabled?: boolean;
+  separatorAfter?: boolean;
+}
+
+function SelectOptionContent({ option, size }: { option: SelectOption; size: "1" | "2" | "3" }) {
+  const main = option.description ? (
+    <Flex
+      direction="column"
+      align="start"
+      gap="0"
+      justify="center"
+      className="select-option-main select-option-main--stacked"
+    >
+      <Flex
+        align="center"
+        gap="2"
+        className="select-option-main__title"
+      >
+        {option.prefix}
+        <Text
+          size={size}
+          truncate
+          style={{
+            fontFamily: option.fontFamily,
+            ...(option.labelColor ? { color: option.labelColor } : undefined),
+          }}
+        >
+          {option.label}
+        </Text>
+      </Flex>
+      <Text
+        size="1"
+        color="gray"
+        className="select-option-description"
+      >
+        {option.description}
+      </Text>
+    </Flex>
+  ) : (
+    <Flex
+      align="center"
+      gap="2"
+      className="select-option-main"
+    >
+      {option.prefix}
+      <Text
+        size={size}
+        truncate
+        style={{
+          fontFamily: option.fontFamily,
+          ...(option.labelColor ? { color: option.labelColor } : undefined),
+        }}
+      >
+        {option.label}
+      </Text>
+    </Flex>
+  );
+
+  return (
+    <Flex
+      align="center"
+      gap="2"
+      justify="between"
+      className="select-option-row"
+    >
+      {main}
+      {option.suffix}
+    </Flex>
+  );
 }
 
 export interface LabeledSelectProps {
@@ -42,6 +113,7 @@ export interface LabeledSelectProps {
   triggerPrefix?: ReactNode;
   hideTriggerChevron?: boolean;
   triggerClassName?: string;
+  contentClassName?: string;
 }
 
 export interface SearchableSelectProps extends LabeledSelectProps {
@@ -62,11 +134,13 @@ export function LabeledSelect({
   contentPosition = "popper",
   labelSize = "2",
   labelWeight = "medium",
+  labelColor,
   layout = "vertical",
   gap = "2",
   triggerLabelVisible = true,
   triggerPrefix,
   triggerClassName,
+  contentClassName,
 }: LabeledSelectProps) {
   const selectedOption = options.find((opt) => opt.value === value);
   const triggerLabel = selectedOption?.label || placeholder;
@@ -80,7 +154,14 @@ export function LabeledSelect({
     >
       <Select.Trigger
         className={triggerClassName}
-        style={triggerStyle}
+        style={
+          selectedOption?.labelColor
+            ? ({
+                "--select-label-color": selectedOption.labelColor,
+                ...triggerStyle,
+              } as CSSProperties)
+            : triggerStyle
+        }
         placeholder={placeholder}
       >
         <Flex
@@ -96,36 +177,30 @@ export function LabeledSelect({
               size={size}
               color={selectedOption ? undefined : "gray"}
               className="select-option-label"
+              style={{ fontFamily: selectedOption?.fontFamily }}
             >
               {triggerLabel}
             </Text>
           )}
         </Flex>
       </Select.Trigger>
-      <Select.Content position={contentPosition}>
+      <Select.Content
+        position={contentPosition}
+        className={contentClassName}
+      >
         {options.map((option) => (
-          <Select.Item
-            key={option.value}
-            value={option.value}
-            disabled={option.disabled}
-          >
-            <Flex
-              align="center"
-              gap="2"
-              justify="between"
-              className="select-option-row"
+          <Fragment key={option.value}>
+            <Select.Item
+              value={option.value}
+              disabled={option.disabled}
             >
-              <Flex
-                align="center"
-                gap="2"
-                className="select-option-row__main"
-              >
-                {option.prefix}
-                {option.label}
-              </Flex>
-              {option.suffix}
-            </Flex>
-          </Select.Item>
+              <SelectOptionContent
+                option={option}
+                size={size}
+              />
+            </Select.Item>
+            {option.separatorAfter ? <Select.Separator /> : null}
+          </Fragment>
         ))}
       </Select.Content>
     </Select.Root>
@@ -144,6 +219,7 @@ export function LabeledSelect({
         <Text
           size={labelSize}
           weight={labelWeight}
+          color={labelColor}
         >
           {label}
         </Text>
@@ -160,6 +236,7 @@ export function LabeledSelect({
       <Text
         size={labelSize}
         weight={labelWeight}
+        color={labelColor}
       >
         {label}
       </Text>
@@ -179,6 +256,7 @@ export function SimpleSelect({
   contentPosition = "popper",
   triggerPrefix,
   triggerClassName,
+  contentClassName,
 }: Omit<
   LabeledSelectProps,
   "label" | "labelSize" | "labelWeight" | "labelColor" | "layout" | "gap"
@@ -195,7 +273,14 @@ export function SimpleSelect({
     >
       <Select.Trigger
         className={triggerClassName}
-        style={triggerStyle}
+        style={
+          selectedOption?.labelColor
+            ? ({
+                "--select-label-color": selectedOption.labelColor,
+                ...triggerStyle,
+              } as CSSProperties)
+            : triggerStyle
+        }
         placeholder={placeholder}
       >
         <Flex
@@ -210,36 +295,30 @@ export function SimpleSelect({
               size={size}
               color={selectedOption ? undefined : "gray"}
               className="select-option-label"
+              style={{ fontFamily: selectedOption?.fontFamily }}
             >
               {triggerLabel}
             </Text>
           )}
         </Flex>
       </Select.Trigger>
-      <Select.Content position={contentPosition}>
+      <Select.Content
+        position={contentPosition}
+        className={contentClassName}
+      >
         {options.map((option) => (
-          <Select.Item
-            key={option.value}
-            value={option.value}
-            disabled={option.disabled}
-          >
-            <Flex
-              align="center"
-              gap="2"
-              justify="between"
-              className="select-option-row"
+          <Fragment key={option.value}>
+            <Select.Item
+              value={option.value}
+              disabled={option.disabled}
             >
-              <Flex
-                align="center"
-                gap="2"
-                className="select-option-row__main"
-              >
-                {option.prefix}
-                {option.label}
-              </Flex>
-              {option.suffix}
-            </Flex>
-          </Select.Item>
+              <SelectOptionContent
+                option={option}
+                size={size}
+              />
+            </Select.Item>
+            {option.separatorAfter ? <Select.Separator /> : null}
+          </Fragment>
         ))}
       </Select.Content>
     </Select.Root>
@@ -318,6 +397,7 @@ export function SearchableSelect({
               size={size}
               color={selectedOption ? undefined : "gray"}
               className="select-option-label"
+              style={{ fontFamily: selectedOption?.fontFamily }}
             >
               {selectedOption?.label || placeholder}
             </Text>
@@ -371,27 +451,10 @@ export function SearchableSelect({
                   className="searchable-select-item"
                   onClick={() => handleSelect(option.value)}
                 >
-                  <Flex
-                    align="center"
-                    gap="2"
-                    justify="between"
-                    className="select-option-row"
-                  >
-                    <Flex
-                      align="center"
-                      gap="2"
-                      className="select-option-row__main select-option-row__main--truncate"
-                    >
-                      {option.prefix}
-                      <Text
-                        size="2"
-                        truncate
-                      >
-                        {option.label}
-                      </Text>
-                    </Flex>
-                    {option.suffix}
-                  </Flex>
+                  <SelectOptionContent
+                    option={option}
+                    size={size}
+                  />
                 </button>
               ))
             ) : (

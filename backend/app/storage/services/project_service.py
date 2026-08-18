@@ -14,6 +14,7 @@ from app.core.storage import delete_cover_file, save_cover_file
 from app.storage.models.project import Project
 from app.storage.repos import chapter_repo, project_repo, volume_repo
 from app.storage.services import task_service, volume_service
+from app.storage.services.revision_service import delete_revision_data_by_project
 
 
 @dataclass
@@ -81,6 +82,9 @@ async def list_projects(
     session: AsyncSession,
     page: int = 1,
     page_size: int = 20,
+    search: str | None = None,
+    sort_by: str = "updated_at",
+    sort_order: str = "desc",
 ) -> ProjectListResult:
     """
     获取项目列表。
@@ -89,13 +93,23 @@ async def list_projects(
         session: 数据库 session。
         page: 页码，从 1 开始。
         page_size: 每页数量。
+        search: 项目标题或简介搜索词。
+        sort_by: 排序字段。
+        sort_order: 排序方向。
 
     Returns:
         项目列表结果。
     """
     offset = (page - 1) * page_size
-    items = await project_repo.list_all(session, offset=offset, limit=page_size)
-    total = await project_repo.count(session)
+    items = await project_repo.list_all(
+        session,
+        offset=offset,
+        limit=page_size,
+        search=search,
+        sort_by=sort_by,
+        sort_order=sort_order,
+    )
+    total = await project_repo.count(session, search=search)
     return ProjectListResult(items=items, total=total, page=page, page_size=page_size)
 
 
@@ -156,6 +170,7 @@ async def delete_project(session: AsyncSession, project_id: str) -> None:
     project = await get_project(session, project_id)
 
     await task_service.delete_all_tasks(session, project_id)
+    await delete_revision_data_by_project(session, project_id)
 
     # 删除项目下的所有章节
     await chapter_repo.delete_by_project(session, project_id)

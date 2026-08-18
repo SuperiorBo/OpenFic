@@ -17,7 +17,7 @@ import {
   createOpenFicVersionCommand,
   resolveOpenFicCliPath,
 } from "./openfic-commands.js";
-import type { StartupProgressTracker } from "../startup-progress.js";
+import type { StartupProgressTracker, ProgressUpdate } from "../startup-progress.js";
 import { appendLog, createLogStream } from "../logging.js";
 
 export type OpenFicRuntimeStep = "create-venv" | "install-uv" | "install-openfic";
@@ -26,7 +26,9 @@ const ANSI_ESCAPE_SEQUENCE = new RegExp(`${String.fromCharCode(0x1b)}\\[[0-9;]*[
 const DEFAULT_PYPI_INDEX_URL = "https://pypi.org/simple/";
 const TSINGHUA_PYPI_INDEX_URL = "https://pypi.tuna.tsinghua.edu.cn/simple/";
 const PYPI_INDEX_PROBE_TIMEOUT_MS = 5_000;
+const BACKEND_READY_TIMEOUT_MS = 60 * 60_000;
 const PYPI_INDEX_PROBE_PACKAGE = "openfic";
+const UV_SYSTEM_CERTS_HINT = "Consider enabling use of system TLS certificates";
 const UTF8_PYTHON_ENVIRONMENT = {
   PYTHONIOENCODING: "utf-8",
   PYTHONUTF8: "1",
@@ -130,18 +132,7 @@ async function probePypiIndex(indexUrl: string, expectedVersion: string): Promis
   }
 }
 
-async function getFastestPypiEnvironment(expectedVersion: string): Promise<NodeJS.ProcessEnv> {
-  await configureDefaultSystemProxy();
-  const probes = await Promise.all(
-    [DEFAULT_PYPI_INDEX_URL, TSINGHUA_PYPI_INDEX_URL].map((indexUrl) => probePypiIndex(indexUrl, expectedVersion)),
-  );
-  let fastestProbe: PypiIndexProbe | null = null;
-  for (const probe of probes) {
-    if (probe && (!fastestProbe || probe.elapsedMs < fastestProbe.elapsedMs)) fastestProbe = probe;
-  }
-
-  const indexUrl = fastestProbe?.indexUrl ?? DEFAULT_PYPI_INDEX_URL;
-  appendLog("runtime", `使用 Python 包索引：${indexUrl}`);
+async function buildPypiEnvironment(indexUrl: string): Promise<NodeJS.ProcessEnv> {
   const proxyEnvironment = await getSystemProxyEnvironment(indexUrl);
   return {
     ...proxyEnvironment,
@@ -150,6 +141,21 @@ async function getFastestPypiEnvironment(expectedVersion: string): Promise<NodeJ
     pip_index_url: indexUrl,
     uv_index_url: indexUrl,
   };
+}
+
+async function getPypiEnvironmentsBySpeed(expectedVersion: string): Promise<NodeJS.ProcessEnv[]> {
+  await configureDefaultSystemProxy();
+  const probes = await Promise.all(
+    [DEFAULT_PYPI_INDEX_URL, TSINGHUA_PYPI_INDEX_URL].map((indexUrl) => probePypiIndex(indexUrl, expectedVersion)),
+  );
+  const orderedUrls = probes
+    .filter((probe): probe is PypiIndexProbe => probe !== null)
+    .sort((a, b) => a.elapsedMs - b.elapsedMs)
+    .map((probe) => probe.indexUrl);
+  if (orderedUrls.length === 0) orderedUrls.push(DEFAULT_PYPI_INDEX_URL);
+
+  appendLog("runtime", `Python 包索引回退顺序：${orderedUrls.join(", ")}`);
+  return Promise.all(orderedUrls.map((indexUrl) => buildPypiEnvironment(indexUrl)));
 }
 
 function run(
@@ -161,7 +167,7 @@ function run(
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     appendLog("runtime", `执行命令：${command} ${args.join(" ")}`);
-    let lastOutputLine = "";
+    const outputLines: string[] = [];
     const child = spawn(command, args, {
       cwd,
       env: { ...process.env, ...UTF8_PYTHON_ENVIRONMENT, ...environment },
@@ -171,7 +177,7 @@ function run(
     const handleOutput = (line: string) => {
       const text = stripAnsi(line).trim();
       if (!text) return;
-      lastOutputLine = text;
+      outputLines.push(text);
       onOutputLine?.(text);
     };
     forwardLines(child.stdout, createLogStream("runtime"), handleOutput);
@@ -186,7 +192,7 @@ function run(
         resolve();
         return;
       }
-      const outputDetail = lastOutputLine ? `：${lastOutputLine}` : "";
+      const outputDetail = outputLines.length ? `：${outputLines.join("\n")}` : "";
       const error = new Error(`${command} ${args.join(" ")} exited with code ${code}${outputDetail}`);
       appendLog("runtime", `命令执行失败：${error.message}`);
       reject(error);
@@ -249,6 +255,51 @@ function succeeds(command: string, args: string[], cwd: string): Promise<boolean
   });
 }
 
+async function runUvInstallWithSystemCertsRetry(
+  uvPath: string,
+  args: string[],
+  cwd: string,
+  onProgress: (step: OpenFicRuntimeStep, message: string) => void,
+  environment?: NodeJS.ProcessEnv,
+): Promise<void> {
+  try {
+    await run(uvPath, args, cwd, (line) => onProgress("install-openfic", line), environment);
+  } catch (error) {
+    if (error instanceof Error && error.message.includes(UV_SYSTEM_CERTS_HINT)) {
+      appendLog("runtime", "检测到 TLS 证书错误，使用 --system-certs 重试");
+      await run(
+        uvPath,
+        ["--system-certs", ...args],
+        cwd,
+        (line) => onProgress("install-openfic", line),
+        environment,
+      );
+      return;
+    }
+    throw error;
+  }
+}
+
+async function runInstallWithIndexFallback(
+  environments: NodeJS.ProcessEnv[],
+  runInstall: (environment: NodeJS.ProcessEnv) => Promise<void>,
+): Promise<void> {
+  let lastError: unknown = null;
+  for (let index = 0; index < environments.length; index += 1) {
+    const environment = environments[index];
+    const indexUrl = environment.UV_INDEX_URL ?? environment.PIP_INDEX_URL ?? `第 ${index + 1} 个`;
+    appendLog("runtime", `尝试使用 Python 包索引安装：${indexUrl}`);
+    try {
+      await runInstall(environment);
+      return;
+    } catch (error) {
+      lastError = error;
+      appendLog("runtime", `使用 ${indexUrl} 安装失败，尝试回退：${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  throw lastError;
+}
+
 export async function inspectOpenFicRuntime(
   runtimeDir: string,
   expectedVersion: string,
@@ -291,8 +342,8 @@ export async function ensureOpenFicRuntime(
   const venvDir = getVenvDir(runtimeDir);
   const venvPythonPath = getVenvPythonPath(runtimeDir);
   const uvPath = getUvPath(runtimeDir);
-  let pypiEnvironment: Promise<NodeJS.ProcessEnv> | null = null;
-  const getPypiEnvironment = () => (pypiEnvironment ??= getFastestPypiEnvironment(expectedVersion));
+  let pypiEnvironments: Promise<NodeJS.ProcessEnv[]> | null = null;
+  const getPypiEnvironments = () => (pypiEnvironments ??= getPypiEnvironmentsBySpeed(expectedVersion));
 
   appendLog("runtime", `开始检查 OpenFic 运行环境：${runtimeDir}`);
   await mkdir(runtimeDir, { recursive: true });
@@ -315,13 +366,15 @@ export async function ensureOpenFicRuntime(
   if (!uvIsUsable) {
     appendLog("runtime", "uv 不存在或不可用，开始安装");
     onProgress("install-uv", "安装 uv");
-    const packageIndexEnvironment = await getPypiEnvironment();
-    await run(
-      venvPythonPath,
-      ["-m", "pip", "install", "--force-reinstall", "uv"],
-      runtimeDir,
-      (message) => onProgress("install-uv", message),
-      packageIndexEnvironment,
+    const packageIndexEnvironments = await getPypiEnvironments();
+    await runInstallWithIndexFallback(packageIndexEnvironments, (environment) =>
+      run(
+        venvPythonPath,
+        ["-m", "pip", "install", "--force-reinstall", "uv"],
+        runtimeDir,
+        (message) => onProgress("install-uv", message),
+        environment,
+      ),
     );
   }
 
@@ -336,18 +389,14 @@ export async function ensureOpenFicRuntime(
       installedVersion ? `OpenFic 后端需要更新：${installedVersion} -> ${expectedVersion}` : "OpenFic 后端尚未安装",
     );
     onProgress("install-openfic", installedVersion ? "更新 OpenFic 后端" : "安装 OpenFic 后端");
-    const packageIndexEnvironment = await getPypiEnvironment();
+    const packageIndexEnvironments = await getPypiEnvironments();
     const installCommand = createOpenFicInstallCommand(
       venvPythonPath,
       expectedVersion,
       installedVersion === expectedVersion && !openFicCliIsUsable,
     );
-    await run(
-      uvPath,
-      installCommand.args,
-      runtimeDir,
-      (message) => onProgress("install-openfic", message),
-      packageIndexEnvironment,
+    await runInstallWithIndexFallback(packageIndexEnvironments, (environment) =>
+      runUvInstallWithSystemCertsRetry(uvPath, installCommand.args, runtimeDir, onProgress, environment),
     );
   }
 
@@ -355,57 +404,183 @@ export async function ensureOpenFicRuntime(
   return { uvPath, venvPythonPath };
 }
 
-const STARTUP_LOG_MILESTONES = [
+const STARTUP_TITLE = "启动 OpenFic 服务";
+
+type StartupLogProgress = Omit<ProgressUpdate, "title">;
+
+interface StartupLogRule {
+  match: RegExp;
+  toProgress: (captures: RegExpMatchArray) => StartupLogProgress;
+}
+
+// 规则顺序与后端真实日志时序一致（见 backend/app/main.py lifespan）。
+// 进度单调递增：0.64 → 0.70 → 0.76 → 0.82 → 维护(0.83→0.94) → 0.95 → 0.96 → health(0.98) → ready(1.0)
+const STARTUP_LOG_RULES: StartupLogRule[] = [
   {
-    text: "Loaded ENCRYPTION_KEY from .key file",
-    step: "start-backend",
-    title: "启动 OpenFic 服务",
-    message: "正在启动服务器进程...",
-    progress: 0.64,
+    match: /Loaded ENCRYPTION_KEY from \.key file/,
+    toProgress: () => ({
+      step: "start-backend",
+      message: "正在启动服务器进程...",
+      progress: 0.64,
+    }),
   },
   {
-    text: "Starting OpenFic",
-    step: "initialize-backend",
-    title: "启动 OpenFic 服务",
-    message: "正在启动 OpenFic 服务...",
-    progress: 0.7,
+    match: /Starting OpenFic/,
+    toProgress: () => ({
+      step: "initialize-backend",
+      message: "正在启动 OpenFic 服务...",
+      progress: 0.7,
+    }),
   },
   {
-    text: "Database initialization or migration started",
-    step: "initialize-database",
-    title: "启动 OpenFic 服务",
-    message: "正在初始化数据库...",
-    progress: 0.76,
+    match: /Database initialization or migration started/,
+    toProgress: () => ({
+      step: "initialize-database",
+      message: "正在初始化数据库...",
+      progress: 0.76,
+    }),
   },
   {
-    text: "Database initialization or migration completed",
-    step: "initialize-database",
-    title: "启动 OpenFic 服务",
-    message: "已完成数据库初始化及迁移",
-    progress: 0.82,
+    match: /Database initialization or migration completed/,
+    toProgress: () => ({
+      step: "initialize-database",
+      message: "已完成数据库初始化及迁移",
+      progress: 0.82,
+    }),
+  },
+  // 维护开始（loguru 行，带换行实时到达）
+  {
+    match: /Local database maintenance started/,
+    toProgress: () => ({
+      step: "maintain-database",
+      message: "正在清理和压缩本地数据",
+      progress: 0.83,
+      indeterminate: true,
+      maintenancePhase: "pruning",
+      maintenanceProgress: null,
+    }),
+  },
+  // 阶段 1 迁移开始（loguru 行）
+  {
+    match: /Migrating checkpoint database to incremental auto-vacuum/,
+    toProgress: () => ({
+      step: "maintain-database",
+      message: "正在迁移检查点数据库",
+      progress: 0.84,
+      indeterminate: true,
+      maintenancePhase: "migrating",
+      maintenanceProgress: null,
+    }),
+  },
+  // 阶段 1 迁移完成（loguru 行）
+  {
+    match: /Migrated checkpoint database to incremental auto-vacuum/,
+    toProgress: () => ({
+      step: "maintain-database",
+      message: "检查点数据库迁移完成",
+      progress: 0.86,
+      maintenancePhase: "migrating",
+      maintenanceProgress: 1,
+    }),
+  },
+  // 阶段 2 回收开始（loguru 行）
+  {
+    match: /Reclaiming checkpoint free space:/,
+    toProgress: () => ({
+      step: "maintain-database",
+      message: "正在清理和压缩本地数据",
+      progress: 0.88,
+      maintenancePhase: "vacuuming",
+      maintenanceProgress: 0,
+    }),
+  },
+  // 阶段 2 跳过回收（loguru 行）
+  {
+    match: /Checkpoint free space below threshold, skipping vacuum/,
+    toProgress: () => ({
+      step: "maintain-database",
+      message: "数据库空间充足，跳过压缩",
+      progress: 0.9,
+      maintenancePhase: "vacuuming",
+      maintenanceProgress: 1,
+    }),
+  },
+  // 维护的最后一步（start_background_runtime 在 _run_startup_maintenance 内被调用）
+  {
+    match: /Background supervisor started/,
+    toProgress: () => ({
+      step: "complete-backend-startup",
+      message: "正在启动内部后台任务服务...",
+      progress: 0.95,
+    }),
+  },
+  // 维护完成（loguru 行）
+  {
+    match: /Local database maintenance completed/,
+    toProgress: () => ({
+      step: "complete-backend-startup",
+      message: "本地数据库维护完成",
+      progress: 0.96,
+    }),
+  },
+  // lifespan 完成，服务可访问
+  {
+    match: /Application startup complete/,
+    toProgress: () => ({
+      step: "complete-backend-startup",
+      message: "OpenFic 服务已完成初始化",
+      progress: 0.97,
+    }),
+  },
+  // [maintenance] 进度行：\r 无换行，实际由后续 \r 冲刷送达，作为上述 loguru 步骤的进度补充
+  {
+    match: /\[maintenance\] Migrating checkpoint database: ([\d,]+) VM ops, ([\d.]+)s elapsed/,
+    toProgress: (captures) => ({
+      step: "maintain-database",
+      message: "正在迁移检查点数据库",
+      progress: 0.84,
+      indeterminate: true,
+      maintenancePhase: "migrating",
+      maintenanceProgress: null,
+      maintenanceVmOps: Number(captures[1].replace(/,/g, "")),
+      maintenanceElapsedSeconds: Number(captures[2]),
+    }),
   },
   {
-    text: "Background supervisor started",
-    step: "complete-backend-startup",
-    title: "启动 OpenFic 服务",
-    message: "正在启动内部后台任务服务...",
-    progress: 0.88,
+    match: /\[maintenance\] Compacting checkpoint database: ([\d.]+)\/([\d.]+)GB \(([\d.]+)%\)/,
+    toProgress: (captures) => {
+      const reclaimed = Number(captures[1]);
+      const total = Number(captures[2]);
+      const percent = Number(captures[3]);
+      return {
+        step: "maintain-database",
+        message: "正在清理和压缩本地数据",
+        progress: 0.88 + (Math.min(100, Math.max(0, percent)) / 100) * 0.06,
+        maintenancePhase: "vacuuming",
+        maintenanceProgress: percent / 100,
+        maintenanceReclaimedBytes: reclaimed * 1024 ** 3,
+        maintenanceTotalBytes: total * 1024 ** 3,
+      };
+    },
   },
-  {
-    text: "Application startup complete",
-    step: "complete-backend-startup",
-    title: "启动 OpenFic 服务",
-    message: "OpenFic 服务已完成初始化",
-    progress: 0.92,
-  },
-] as const;
+];
+
+function matchStartupLogLine(line: string): ProgressUpdate | null {
+  for (const rule of STARTUP_LOG_RULES) {
+    const captures = line.match(rule.match);
+    if (!captures) continue;
+    return { title: STARTUP_TITLE, ...rule.toProgress(captures) };
+  }
+  return null;
+}
 
 export async function startLocalOpenFicBackend(
   venvPythonPath: string,
   expectedVersion: string,
   startupProgress?: StartupProgressTracker,
   signal?: AbortSignal,
-): Promise<BackendProcessHandle> {
+  dataDir?: string,
+): Promise<{ handle: BackendProcessHandle; maintenanceError: string | null }> {
   throwIfAborted(signal);
   startupProgress?.begin({
     step: "start-backend",
@@ -418,48 +593,31 @@ export async function startLocalOpenFicBackend(
   const command = createOpenFicServeCommand(venvPythonPath, port);
   const proxyEnvironment = await getSystemProxyEnvironment("https://pypi.org/");
   throwIfAborted(signal);
-  let healthFallbackTimer: NodeJS.Timeout | null = null;
-  let latestMilestone: (typeof STARTUP_LOG_MILESTONES)[number] | null = null;
-
-  const beginHealthFallback = () => {
-    if (latestMilestone) {
-      startupProgress?.update({
-        ...latestMilestone,
-        message: "启动时间较长，仍在等待应用服务响应",
-      });
-      return;
-    }
-    startupProgress?.update({
-      step: "start-backend",
-      title: "启动 OpenFic 服务",
-      message: "启动时间较长，仍在等待应用服务响应",
-      progress: 0.6,
-    });
-  };
-
-  const scheduleHealthFallback = () => {
-    if (healthFallbackTimer) clearTimeout(healthFallbackTimer);
-    healthFallbackTimer = setTimeout(beginHealthFallback, 5_000);
-  };
+  let latestMilestone: ProgressUpdate | null = null;
 
   const handle = startBackendProcess({
     command: command.command,
     args: command.args,
     port,
+    dataDir,
     environment: proxyEnvironment,
     onOutputLine: (line) => {
-      const milestone = STARTUP_LOG_MILESTONES.find((candidate) => line.includes(candidate.text));
-      if (!milestone) return;
-      latestMilestone = milestone;
-      startupProgress?.begin(milestone);
-      scheduleHealthFallback();
+      const progress = matchStartupLogLine(line);
+      if (!progress) return;
+      // 日志时序可能与规则表顺序不一致（如维护行之后才输出启动完成行），
+      // 进度只允许单调递增，忽略会回退的匹配，保证 UI 进度不倒退。
+      if (progress.progress < (latestMilestone?.progress ?? 0)) return;
+      latestMilestone = progress;
+      startupProgress?.begin(progress);
     },
   });
 
-  scheduleHealthFallback();
   try {
-    const health = await waitForBackend(handle.baseUrl, { process: handle.process, signal });
-    if (healthFallbackTimer) clearTimeout(healthFallbackTimer);
+    const health = await waitForBackend(handle.baseUrl, {
+      process: handle.process,
+      signal,
+      timeoutMs: BACKEND_READY_TIMEOUT_MS,
+    });
     startupProgress?.begin({
       step: "check-health",
       title: "启动 OpenFic 服务",
@@ -470,11 +628,25 @@ export async function startLocalOpenFicBackend(
       abortStartingBackendProcess(handle);
       throw new Error(`本地后端版本不匹配：期望 ${expectedVersion}，实际 ${health.version ?? "未知"}`);
     }
-    return handle;
+
+    const maintenanceError = await fetchBackendMaintenanceError(handle.baseUrl);
+
+    return { handle, maintenanceError };
   } catch (error) {
-    if (healthFallbackTimer) clearTimeout(healthFallbackTimer);
     abortStartingBackendProcess(handle);
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`${message}。日志路径：${handle.logPath}`);
+  }
+}
+
+async function fetchBackendMaintenanceError(baseUrl: string): Promise<string | null> {
+  try {
+    const response = await fetch(`${baseUrl}/api/v1/health/maintenance`);
+    if (!response.ok) return null;
+    const data = (await response.json()) as { status?: string; error?: string | null };
+    if (data.status !== "failed") return null;
+    return data.error || "本地数据库维护失败";
+  } catch {
+    return null;
   }
 }

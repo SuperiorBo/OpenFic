@@ -80,8 +80,10 @@ async def test_get_settings_default(client: AsyncClient) -> None:
     # 验证默认值
     assert data["language"] == "zh-CN"
     assert data["theme"] == "light"
-    assert data["font_family"] == "SourceHanSerifCN-VF"
-    assert data["code_font_family"] == "JetBrainsMapleMono"
+    assert data["font_family"] == "system-ui"
+    assert data["code_font_family"] == "ui-monospace"
+    assert data["base_font_size"] == 14
+    assert data["editor_font_size"] == 16
     assert data["default_model"] == ""
     assert data["light_model"] == ""
     assert data["default_embedding_model"] == ""
@@ -95,6 +97,10 @@ async def test_get_settings_default(client: AsyncClient) -> None:
     assert data["agent_bypass_tool_approval"] is False
     assert data["agent_tool_permissions"] == EXPECTED_AGENT_TOOL_PERMISSIONS
     assert data["audit_persist_details"] is False
+    assert data["compress_system_prompts"] is False
+    assert data["editor_auto_indent"] is True
+    assert data["editor_auto_convert_punctuation"] is False
+    assert data["editor_auto_pair_symbols"] is False
 
 
 @pytest.mark.asyncio
@@ -109,7 +115,7 @@ async def test_update_settings_language(client: AsyncClient) -> None:
     assert data["language"] == "en"
     # 其他设置保持默认值
     assert data["theme"] == "light"
-    assert data["font_family"] == "SourceHanSerifCN-VF"
+    assert data["font_family"] == "system-ui"
 
 
 @pytest.mark.asyncio
@@ -129,11 +135,35 @@ async def test_update_settings_font(client: AsyncClient) -> None:
     """测试更新字体设置。"""
     response = await client.put(
         "/api/v1/settings",
-        json={"font_family": "SourceHanSansCN-VF"},
+        json={"font_family": "Noto Sans SC Variable"},
     )
     assert response.status_code == 200
     data = response.json()
-    assert data["font_family"] == "SourceHanSansCN-VF"
+    assert data["font_family"] == "Noto Sans SC Variable"
+
+
+@pytest.mark.asyncio
+async def test_update_settings_base_font_size(client: AsyncClient) -> None:
+    """测试更新基础字号设置。"""
+    response = await client.put(
+        "/api/v1/settings",
+        json={"base_font_size": 16},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["base_font_size"] == 16
+
+
+@pytest.mark.asyncio
+async def test_update_settings_editor_font_size(client: AsyncClient) -> None:
+    """测试更新编辑器字号设置。"""
+    response = await client.put(
+        "/api/v1/settings",
+        json={"editor_font_size": 18},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["editor_font_size"] == 18
 
 
 @pytest.mark.asyncio
@@ -144,14 +174,14 @@ async def test_update_settings_multiple(client: AsyncClient) -> None:
         json={
             "language": "en",
             "theme": "dark",
-            "font_family": "SourceHanSansCN-VF",
+            "font_family": "Noto Sans SC Variable",
         },
     )
     assert response.status_code == 200
     data = response.json()
     assert data["language"] == "en"
     assert data["theme"] == "dark"
-    assert data["font_family"] == "SourceHanSansCN-VF"
+    assert data["font_family"] == "Noto Sans SC Variable"
 
 
 @pytest.mark.asyncio
@@ -177,7 +207,7 @@ async def test_update_settings_partial(client: AsyncClient) -> None:
     # 先设置初始值
     await client.put(
         "/api/v1/settings",
-        json={"language": "en", "theme": "dark", "font_family": "SourceHanSansCN-VF"},
+        json={"language": "en", "theme": "dark", "font_family": "Noto Sans SC Variable"},
     )
 
     # 只更新语言
@@ -191,7 +221,7 @@ async def test_update_settings_partial(client: AsyncClient) -> None:
     assert data["language"] == "zh-CN"
     # 其他设置保持不变
     assert data["theme"] == "dark"
-    assert data["font_family"] == "SourceHanSansCN-VF"
+    assert data["font_family"] == "Noto Sans SC Variable"
 
 
 @pytest.mark.asyncio
@@ -371,6 +401,81 @@ async def test_update_settings_audit_persist_details(client: AsyncClient) -> Non
         "/api/v1/settings",
         json={"audit_persist_details": True},
     )
+
+
+@pytest.mark.asyncio
+async def test_update_settings_editor_auto_indent(client: AsyncClient) -> None:
+    """编辑器段落自动缩进开关应可持久化。"""
+    response = await client.put(
+        "/api/v1/settings",
+        json={"editor_auto_indent": False},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["editor_auto_indent"] is False
+
+    follow_up = await client.get("/api/v1/settings")
+    assert follow_up.status_code == 200
+    assert follow_up.json()["editor_auto_indent"] is False
+
+
+@pytest.mark.asyncio
+async def test_update_settings_editor_auto_convert_punctuation(client: AsyncClient) -> None:
+    """编辑器自动转换半角符号开关应可持久化。"""
+    response = await client.put(
+        "/api/v1/settings",
+        json={"editor_auto_convert_punctuation": True},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["editor_auto_convert_punctuation"] is True
+
+    follow_up = await client.get("/api/v1/settings")
+    assert follow_up.status_code == 200
+    assert follow_up.json()["editor_auto_convert_punctuation"] is True
+
+
+@pytest.mark.asyncio
+async def test_update_settings_editor_auto_pair_symbols(client: AsyncClient) -> None:
+    """编辑器成对符号自动补齐开关应可持久化。"""
+    response = await client.put(
+        "/api/v1/settings",
+        json={"editor_auto_pair_symbols": True},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["editor_auto_pair_symbols"] is True
+
+    follow_up = await client.get("/api/v1/settings")
+    assert follow_up.status_code == 200
+    assert follow_up.json()["editor_auto_pair_symbols"] is True
+
+
+@pytest.mark.asyncio
+async def test_update_settings_compress_system_prompts(client: AsyncClient) -> None:
+    """压缩系统提示词开关应可持久化。"""
+    response = await client.put(
+        "/api/v1/settings",
+        json={"compress_system_prompts": False},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["compress_system_prompts"] is False
+
+    follow_up = await client.get("/api/v1/settings")
+    assert follow_up.status_code == 200
+    assert follow_up.json()["compress_system_prompts"] is False
+
+    enabled = await client.put(
+        "/api/v1/settings",
+        json={"compress_system_prompts": True},
+    )
+    assert enabled.status_code == 200
+    assert enabled.json()["compress_system_prompts"] is True
+
+    enabled_follow_up = await client.get("/api/v1/settings")
+    assert enabled_follow_up.status_code == 200
+    assert enabled_follow_up.json()["compress_system_prompts"] is True
 
 
 @pytest.mark.asyncio

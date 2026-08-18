@@ -146,6 +146,32 @@ class AgentToolApprovalRequest(BaseModel):
     approved: bool = Field(..., description="是否批准")
 
 
+class AgentInterruptResponseItem(BaseModel):
+    """单个并行中断响应。"""
+
+    interrupt_id: str = Field(..., description="LangGraph 中断ID")
+    action_type: str = Field(..., description="中断响应类型")
+    approval_id: str | None = Field(default=None, description="工具审批ID")
+    approved: bool | None = Field(default=None, description="是否批准工具")
+    action_id: str | None = Field(default=None, description="澄清请求ID")
+    answer: list[AgentQuestionAnswerItem] | None = Field(
+        default=None,
+        description="澄清问题回答",
+    )
+
+
+class AgentInterruptResumeRequest(BaseModel):
+    """批量恢复同一轮并行中断。"""
+
+    batch_id: str = Field(..., description="中断批次ID")
+    responses: list[AgentInterruptResponseItem] = Field(
+        ...,
+        min_length=1,
+        max_length=10,
+        description="本批全部中断响应",
+    )
+
+
 class AgentToolMetadataResponse(BaseModel):
     """Agent 工具权限元数据。"""
 
@@ -159,6 +185,7 @@ class AgentSessionStateResponse(BaseModel):
     session_id: str = Field(..., description="会话ID")
     state: dict = Field(..., description="状态信息")
     is_running: bool = Field(default=False, description="会话是否仍有后台运行任务")
+    interrupts: list[dict] = Field(default_factory=list, description="待处理的可恢复中断")
 
 
 class ActiveSubagentStateResponse(BaseModel):

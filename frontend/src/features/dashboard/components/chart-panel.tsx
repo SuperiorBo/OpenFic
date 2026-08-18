@@ -7,6 +7,7 @@ import { useTranslation } from "react-i18next";
 
 import { Spinner } from "@/components";
 
+import { getDashboardXAxisTickValues } from "../lib/dashboard-chart-axis";
 import type {
   DashboardBarDatum,
   DashboardChartAxisFormat,
@@ -35,16 +36,36 @@ const dashboardChartTextTheme = {
     domain: { line: { stroke: "var(--gray-a6)" } },
     ticks: {
       line: { stroke: "var(--gray-a6)" },
-      text: { fill: "var(--gray-11)", fontFamily: dashboardChartFontFamily, fontSize: 13 },
+      text: {
+        fill: "var(--gray-11)",
+        fontFamily: dashboardChartFontFamily,
+        fontSize: "var(--font-size-md)",
+      },
     },
     legend: {
-      text: { fill: "var(--gray-11)", fontFamily: dashboardChartFontFamily, fontSize: 13 },
+      text: {
+        fill: "var(--gray-11)",
+        fontFamily: dashboardChartFontFamily,
+        fontSize: "var(--font-size-md)",
+      },
     },
   },
   grid: { line: { stroke: "var(--gray-a4)" } },
   crosshair: { line: { stroke: "var(--gray-12)", strokeWidth: 1 } },
-  legends: { text: { fill: "var(--gray-11)", fontFamily: dashboardChartFontFamily, fontSize: 13 } },
-  labels: { text: { fill: "var(--gray-12)", fontFamily: dashboardChartFontFamily, fontSize: 13 } },
+  legends: {
+    text: {
+      fill: "var(--gray-11)",
+      fontFamily: dashboardChartFontFamily,
+      fontSize: "var(--font-size-md)",
+    },
+  },
+  labels: {
+    text: {
+      fill: "var(--gray-12)",
+      fontFamily: dashboardChartFontFamily,
+      fontSize: "var(--font-size-md)",
+    },
+  },
   tooltip: {
     container: {
       minWidth: "120px",
@@ -52,7 +73,7 @@ const dashboardChartTextTheme = {
       background: "var(--color-panel-solid)",
       color: "var(--gray-12)",
       fontFamily: dashboardChartFontFamily,
-      fontSize: "13px",
+      fontSize: "var(--font-size-md)",
       whiteSpace: "nowrap",
     },
   },
@@ -144,6 +165,15 @@ function getIntegerTickValues(maxValue: number): number[] | undefined {
 function getXAxisFormat(option: DashboardChartModel): DashboardChartAxisFormat | undefined {
   if (option.kind === "pie") return undefined;
   return option.xAxisFormat;
+}
+
+function getXAxisTickValues(option: DashboardChartModel): string[] | undefined {
+  if (option.kind === "pie") return undefined;
+  if (option.kind === "bar")
+    return getDashboardXAxisTickValues(option.data.map((item) => item.label));
+  return getDashboardXAxisTickValues(
+    Array.from(new Set(option.data.flatMap((series) => series.data.map((item) => item.x)))),
+  );
 }
 
 interface TooltipContent {
@@ -259,6 +289,7 @@ export function ChartPanel({
   const areaBaselineValue = getChartMinValue(option);
   const valueFormat = (value: number) => formatChartValue(value, option.valueFormat);
   const xAxisFormat = (value: string | number) => formatAxisValue(value, getXAxisFormat(option));
+  const xAxisTickValues = getXAxisTickValues(option);
   const lineTooltip = ({ slice }: SliceTooltipProps<DashboardLineSeries>) => (
     <ChartTooltipRows
       rows={slice.points.map((point) => ({
@@ -364,7 +395,12 @@ export function ChartPanel({
                   }}
                   axisTop={null}
                   axisRight={null}
-                  axisBottom={{ tickSize: 0, tickPadding: 8, format: xAxisFormat }}
+                  axisBottom={{
+                    tickSize: 0,
+                    tickPadding: 8,
+                    format: xAxisFormat,
+                    tickValues: xAxisTickValues,
+                  }}
                   axisLeft={{
                     tickSize: 0,
                     tickPadding: 8,
@@ -401,7 +437,12 @@ export function ChartPanel({
                   borderWidth={0}
                   axisTop={null}
                   axisRight={null}
-                  axisBottom={{ tickSize: 0, tickPadding: 8, format: xAxisFormat }}
+                  axisBottom={{
+                    tickSize: 0,
+                    tickPadding: 8,
+                    format: xAxisFormat,
+                    tickValues: xAxisTickValues,
+                  }}
                   axisLeft={{
                     tickSize: 0,
                     tickPadding: 8,

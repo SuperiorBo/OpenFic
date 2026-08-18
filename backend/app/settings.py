@@ -107,8 +107,8 @@ class Settings(BaseSettings):
 
     # LLM invocation timeouts & retries
     llm_connect_timeout: float = 10.0
-    llm_total_timeout: float = 300.0
     llm_chunk_timeout: float = 120.0
+    llm_request_timeout: float = 600.0
     llm_retry_max_attempts: int = 5
     llm_retry_base_interval: float = 2.0
     llm_retry_max_interval: float = 30.0
@@ -116,6 +116,10 @@ class Settings(BaseSettings):
 
     # Security - Encryption key for sensitive data (API keys, etc.)
     encryption_key: str = _ensure_encryption_key()
+
+    # Telemetry - PostHog error reporting (project API key, safe to expose)
+    posthog_api_key: str = "phc_kHbik4h8n5KHfZxyTbddA2p6y8zxRNGpsDBNycizyK68"
+    posthog_host: str = "https://us.i.posthog.com"
 
     @property
     def database_url(self) -> str:

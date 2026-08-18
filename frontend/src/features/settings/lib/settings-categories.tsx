@@ -4,18 +4,22 @@ import {
   Cable,
   Database,
   FileText,
+  MessagesSquare,
   Package,
   Settings as SettingsIcon,
   ShieldAlert,
   SlidersHorizontal,
+  Type,
 } from "lucide-react";
 import type { ReactNode } from "react";
 
 export type SettingsCategory =
   | "general"
+  | "editor"
   | "connections"
   | "models"
   | "index"
+  | "context"
   | "agent-tools"
   | "rules"
   | "skills"
@@ -35,6 +39,11 @@ export const SETTINGS_CATEGORY_ITEMS: SettingsCategoryItem[] = [
     labelKey: "settings.general",
   },
   {
+    id: "editor",
+    icon: <Type size={16} />,
+    labelKey: "settings.editor",
+  },
+  {
     id: "connections",
     icon: <Cable size={16} />,
     labelKey: "settings.connections",
@@ -48,6 +57,11 @@ export const SETTINGS_CATEGORY_ITEMS: SettingsCategoryItem[] = [
     id: "index",
     icon: <Database size={16} />,
     labelKey: "settings.index",
+  },
+  {
+    id: "context",
+    icon: <MessagesSquare size={16} />,
+    labelKey: "settings.context",
   },
   {
     id: "agent-tools",

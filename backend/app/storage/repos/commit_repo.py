@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import col
 
 from app.storage.models.commit import Commit
+from app.storage.repos import revision_content_blob_repo
 
 
 async def create(session: AsyncSession, commit: Commit) -> Commit:
@@ -27,6 +28,47 @@ async def create(session: AsyncSession, commit: Commit) -> Commit:
     return commit
 
 
+async def _hydrate_commit(
+    session: AsyncSession,
+    commit: Commit | None,
+) -> Commit | None:
+    """Fill inline content columns from blob references (if any)."""
+    if commit is None:
+        return None
+    await revision_content_blob_repo.hydrate_content(
+        session,
+        [commit],
+        blob_id_attr="snapshot_content_blob_id",
+        content_attr="snapshot_content",
+    )
+    await revision_content_blob_repo.hydrate_content(
+        session,
+        [commit],
+        blob_id_attr="new_content_blob_id",
+        content_attr="new_content",
+    )
+    return commit
+
+
+async def _hydrate_commits(
+    session: AsyncSession,
+    commits: list[Commit],
+) -> list[Commit]:
+    await revision_content_blob_repo.hydrate_content(
+        session,
+        commits,
+        blob_id_attr="snapshot_content_blob_id",
+        content_attr="snapshot_content",
+    )
+    await revision_content_blob_repo.hydrate_content(
+        session,
+        commits,
+        blob_id_attr="new_content_blob_id",
+        content_attr="new_content",
+    )
+    return commits
+
+
 async def get_by_id(session: AsyncSession, commit_id: str) -> Commit | None:
     """
     根据 ID 获取变更记录。
@@ -39,7 +81,7 @@ async def get_by_id(session: AsyncSession, commit_id: str) -> Commit | None:
         变更实例，如果不存在则返回 None。
     """
     result = await session.execute(select(Commit).where(col(Commit.id) == commit_id))
-    return result.scalar_one_or_none()
+    return await _hydrate_commit(session, result.scalar_one_or_none())
 
 
 async def list_by_revision(
@@ -61,7 +103,7 @@ async def list_by_revision(
         .where(col(Commit.revision_id) == revision_id)
         .order_by(col(Commit.created_at).asc())
     )
-    return list(result.scalars().all())
+    return await _hydrate_commits(session, list(result.scalars().all()))
 
 
 async def list_by_chapter(
@@ -89,7 +131,7 @@ async def list_by_chapter(
         .offset(offset)
         .limit(limit)
     )
-    return list(result.scalars().all())
+    return await _hydrate_commits(session, list(result.scalars().all()))
 
 
 async def delete(session: AsyncSession, commit: Commit) -> None:

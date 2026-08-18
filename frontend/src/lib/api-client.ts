@@ -6,10 +6,10 @@
 
 import axios from "axios";
 
-import { getRuntimeConfig } from "./runtime-config";
+import { getConfiguredBackendBaseUrl, getRuntimeConfig } from "./runtime-config";
 
 export function getApiBaseUrl(): string {
-  const backendBaseUrl = getRuntimeConfig()?.backendBaseUrl;
+  const backendBaseUrl = getRuntimeConfig()?.backendBaseUrl ?? getConfiguredBackendBaseUrl();
   if (backendBaseUrl) return `${backendBaseUrl}/api/v1`;
   return "/api/v1";
 }
@@ -22,7 +22,7 @@ export function resolveBackendUrl(url: string | null | undefined): string | null
   if (!url) return null;
   if (!url.startsWith("/") || url.startsWith("//")) return url;
 
-  const backendBaseUrl = getRuntimeConfig()?.backendBaseUrl;
+  const backendBaseUrl = getRuntimeConfig()?.backendBaseUrl ?? getConfiguredBackendBaseUrl();
   return backendBaseUrl ? `${backendBaseUrl}${url}` : url;
 }
 
@@ -127,6 +127,9 @@ export async function fetchProjects(params?: ProjectListParams): Promise<Project
     params: {
       page: params?.page ?? 1,
       page_size: params?.pageSize ?? 20,
+      search: params?.search?.trim() || undefined,
+      sort_by: params?.sortBy ?? "updated_at",
+      sort_order: params?.sortOrder ?? "desc",
     },
   });
   const data = response.data;
@@ -499,6 +502,7 @@ import type {
   AgentRuleUpdate,
   AgentRuleListResponse,
   AgentRuleListParams,
+  AgentRuleScopeListResponse,
 } from "./agent-rule.types";
 
 function transformAgentRule(raw: Record<string, unknown>): AgentRule {
@@ -506,9 +510,25 @@ function transformAgentRule(raw: Record<string, unknown>): AgentRule {
     id: raw.id as string,
     title: raw.title as string,
     content: raw.content as string,
+    scope: (raw.scope as string) ?? "global",
+    projectId: (raw.project_id as string | null) ?? null,
+    tokenCount: (raw.token_count as number) ?? 0,
     orderIndex: (raw.order_index as number) ?? 0,
     createdAt: raw.created_at as string,
     updatedAt: raw.updated_at as string,
+  };
+}
+
+export async function fetchAgentRuleScopes(): Promise<AgentRuleScopeListResponse> {
+  const response = await apiClient.get("/agent-rules/scopes");
+  const data = response.data;
+  return {
+    items: (data.items as Record<string, unknown>[]).map((raw) => ({
+      scope: raw.scope as string,
+      projectId: (raw.project_id as string | null) ?? null,
+      title: raw.title as string,
+      ruleCount: (raw.rule_count as number) ?? 0,
+    })),
   };
 }
 
@@ -519,6 +539,8 @@ export async function fetchAgentRules(
     params: {
       page: params?.page ?? 1,
       page_size: params?.pageSize ?? 100,
+      scope: params?.scope ?? "global",
+      project_id: params?.projectId ?? undefined,
     },
   });
   const data = response.data;
@@ -534,6 +556,8 @@ export async function createAgentRule(data: AgentRuleCreate): Promise<AgentRule>
   const response = await apiClient.post("/agent-rules", {
     title: data.title,
     content: data.content,
+    scope: data.scope ?? "global",
+    project_id: data.projectId ?? null,
   });
   return transformAgentRule(response.data);
 }
@@ -2162,6 +2186,7 @@ import type {
   AgentSessionStateResponse,
   AgentRollbackResponse,
   AgentCancelResponse,
+  AgentInterruptBatchResponse,
   AgentQuestionAnswerResponse,
   ClarificationAnswerItem,
   ReasoningEffort,
@@ -2190,6 +2215,11 @@ export async function fetchAgentSessionState(
         ? (data.state as Record<string, unknown>)
         : {},
     isRunning: data.is_running === true,
+    interrupts: Array.isArray(data.interrupts)
+      ? data.interrupts.filter((item): item is Record<string, unknown> =>
+          Boolean(item && typeof item === "object" && !Array.isArray(item)),
+        )
+      : [],
   };
 }
 
@@ -2439,6 +2469,17 @@ export async function submitAgentToolApproval(
   await apiClient.post(`/agent/sessions/${sessionId}/tool-approval`, {
     approval_id: approvalId,
     approved,
+  });
+}
+
+export async function submitAgentInterruptBatch(
+  sessionId: string,
+  batchId: string,
+  responses: AgentInterruptBatchResponse[],
+): Promise<void> {
+  await apiClient.post(`/agent/sessions/${sessionId}/interrupt-resume`, {
+    batch_id: batchId,
+    responses,
   });
 }
 

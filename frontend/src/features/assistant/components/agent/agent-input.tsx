@@ -1,15 +1,7 @@
 import { Box, Flex, IconButton, Text, Tooltip } from "@radix-ui/themes";
-import {
-  ArrowUp,
-  CircleUserRound,
-  CloudUpload,
-  ExternalLink,
-  ShieldCheck,
-  Square,
-  X,
-} from "lucide-react";
+import { ArrowUp, CloudUpload, ExternalLink, ShieldCheck, Square, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { PhotoProvider, PhotoView } from "react-photo-view";
@@ -22,6 +14,7 @@ import { SimpleSelect, type SelectOption } from "@/components/select";
 import { ProviderIcon } from "@/features/settings/lib/provider-icons";
 import type { AgentPendingMessage, AgentSessionStatus, ReasoningEffort } from "@/lib/agent.types";
 
+import { useAgentInputHistory } from "../../hooks/use-agent-input-history";
 import {
   getAgentImageFiles,
   hasLeftAgentImageDropZone,
@@ -29,6 +22,7 @@ import {
   type PendingAgentImageAttachment,
   validateAgentImageFiles,
 } from "../../lib/agent-image-attachments";
+import type { AgentInputHistoryDirection } from "../../lib/agent-input-history-state";
 import { AgentComposerEditor, type AgentComposerSuggestionState } from "./agent-composer-editor";
 import { AgentIndexStatusIndicator } from "./agent-index-status-indicator";
 import { canSendAgentInput, getAgentInputBodyMode, isAgentInputLocked } from "./agent-input-state";
@@ -129,6 +123,15 @@ export function AgentInput({
   const [mentionSuggestions, setMentionSuggestions] = useState<AgentComposerSuggestionState | null>(
     null,
   );
+  const {
+    draft: persistedDraft,
+    handleInputChange: handleHistoryInputChange,
+    isDraftLoaded,
+    navigate: navigateInputHistory,
+    record: recordInputHistory,
+  } = useAgentInputHistory(projectId);
+  const historyValueRef = useRef<string | null>(null);
+  const previousProjectIdRef = useRef(projectId);
   const selectedModel = useMemo(
     () => models.find((model) => model.value === modelId || model.id === modelId),
     [modelId, models],
@@ -153,6 +156,54 @@ export function AgentInput({
     { value: "xhigh", label: "Xhigh" },
     { value: "max", label: "Max" },
   ];
+
+  useEffect(() => {
+    if (previousProjectIdRef.current === projectId) return;
+    previousProjectIdRef.current = projectId;
+    historyValueRef.current = "";
+    onChange("");
+  }, [onChange, projectId]);
+
+  useEffect(() => {
+    if (!isDraftLoaded || !persistedDraft || value !== "") return;
+    historyValueRef.current = persistedDraft;
+    onChange(persistedDraft);
+  }, [isDraftLoaded, onChange, persistedDraft, value]);
+
+  useEffect(() => {
+    if (!isDraftLoaded) return;
+    if (historyValueRef.current === value) {
+      historyValueRef.current = null;
+      return;
+    }
+    historyValueRef.current = null;
+    handleHistoryInputChange(value);
+  }, [handleHistoryInputChange, isDraftLoaded, value]);
+
+  const handleComposerChange = useCallback(
+    (nextValue: string) => {
+      historyValueRef.current = null;
+      handleHistoryInputChange(nextValue);
+      onChange(nextValue);
+    },
+    [handleHistoryInputChange, onChange],
+  );
+
+  const handleHistoryNavigate = useCallback(
+    (direction: AgentInputHistoryDirection): boolean => {
+      const nextValue = navigateInputHistory(direction, value);
+      if (nextValue === null) return false;
+      historyValueRef.current = nextValue;
+      onChange(nextValue);
+      return true;
+    },
+    [navigateInputHistory, onChange, value],
+  );
+
+  const handleSubmit = useCallback(() => {
+    recordInputHistory(value);
+    onSend();
+  }, [onSend, recordInputHistory, value]);
 
   useLayoutEffect(() => {
     const container = inputContainerRef.current;
@@ -346,7 +397,7 @@ export function AgentInput({
                     borderRadius: "10px",
                     background: "var(--gray-a3)",
                     color: "var(--gray-11)",
-                    fontSize: "12px",
+                    fontSize: "var(--font-size-sm)",
                     lineHeight: 1.5,
                   }}
                 >
@@ -411,8 +462,9 @@ export function AgentInput({
                   onMentionSuggestionsChange={setMentionSuggestions}
                   onPasteFiles={handlePastedFiles}
                   onDropFiles={handleDroppedFiles}
-                  onChange={onChange}
-                  onSubmit={onSend}
+                  onChange={handleComposerChange}
+                  onHistoryNavigate={handleHistoryNavigate}
+                  onSubmit={handleSubmit}
                 />
               </motion.div>
             )}
@@ -489,16 +541,11 @@ export function AgentInput({
                       options={agentOptions}
                       onChange={onAgentChange}
                       size="1"
-                      triggerPrefix={
-                        <CircleUserRound
-                          size={14}
-                          aria-hidden="true"
-                        />
-                      }
                       hideTriggerChevron
+                      contentClassName="ai-sidebar-agent-select-content"
                       triggerClassName="ai-sidebar-inline-select-trigger ai-sidebar-agent-select-trigger"
                       triggerStyle={{
-                        fontSize: "12px",
+                        fontSize: "var(--font-size-sm)",
                         border: "none",
                         background: "transparent",
                         boxShadow: "none",
@@ -526,7 +573,7 @@ export function AgentInput({
                       hideTriggerChevron
                       triggerClassName="ai-sidebar-inline-select-trigger"
                       triggerStyle={{
-                        fontSize: "12px",
+                        fontSize: "var(--font-size-sm)",
                         border: "none",
                         background: "transparent",
                         boxShadow: "none",
@@ -543,7 +590,7 @@ export function AgentInput({
                         hideTriggerChevron
                         triggerClassName="ai-sidebar-inline-select-trigger ai-sidebar-reasoning-effort-trigger"
                         triggerStyle={{
-                          fontSize: "12px",
+                          fontSize: "var(--font-size-sm)",
                           border: "none",
                           background: "transparent",
                           boxShadow: "none",
@@ -607,7 +654,7 @@ export function AgentInput({
                 variant="solid"
                 size="1"
                 className="ai-sidebar-send-button"
-                onClick={shouldAbort ? onAbort : onSend}
+                onClick={shouldAbort ? onAbort : handleSubmit}
                 disabled={shouldAbort ? false : !canSend}
                 aria-disabled={!buttonActive || undefined}
                 style={{

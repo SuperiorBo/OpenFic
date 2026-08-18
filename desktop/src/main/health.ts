@@ -10,7 +10,7 @@ export interface BackendHealth {
 
 interface WaitForBackendOptions {
   process?: ChildProcess;
-  timeoutMs?: number;
+  timeoutMs?: number | null;
   signal?: AbortSignal;
 }
 
@@ -45,11 +45,12 @@ function isLoopbackUrl(url: string): boolean {
 
 export async function waitForBackend(
   baseUrl: string,
-  options: WaitForBackendOptions | number = DEFAULT_TIMEOUT_MS,
+  options: WaitForBackendOptions | number | null = DEFAULT_TIMEOUT_MS,
 ): Promise<BackendHealth> {
-  const timeoutMs = typeof options === "number" ? options : (options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
-  const backendProcess = typeof options === "number" ? undefined : options.process;
-  const externalSignal = typeof options === "number" ? undefined : options.signal;
+  const timeoutMs =
+    typeof options === "number" ? options : (options?.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  const backendProcess = typeof options === "number" || options === null ? undefined : options.process;
+  const externalSignal = typeof options === "number" || options === null ? undefined : options.signal;
   const healthUrl = `${baseUrl.replace(/\/+$/, "")}/api/v1/health`;
   const controller = new AbortController();
   let processError: Error | null = null;
@@ -72,7 +73,7 @@ export async function waitForBackend(
   externalSignal?.addEventListener("abort", abortWait, { once: true });
   backendProcess?.once("exit", onExit);
   backendProcess?.once("error", onError);
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const timeout = timeoutMs === null ? undefined : setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     while (!controller.signal.aborted) {
@@ -113,3 +114,4 @@ export async function waitForBackend(
     backendProcess?.off("error", onError);
   }
 }
+

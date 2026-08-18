@@ -2,14 +2,24 @@ import { contextBridge, ipcRenderer, webFrame } from "electron";
 import { fileURLToPath } from "node:url";
 import {
   IpcChannels,
+  type BackupDataRequest,
+  type DataInfo,
+  type DataProgressEvent,
   type EnsureInstanceSessionRequest,
+  type GetDataInfoRequest,
   type InitializeAppResult,
+  type InspectDataDirRequest,
+  type InspectDataDirResult,
   type InspectLocalRuntimeRequest,
   type InspectLocalRuntimeResult,
   type InstallRuntimeRequest,
   type LogFrontendDiagnosticRequest,
+  type MigrateDataRequest,
+  type MigrateDataResult,
   type PingInstanceRequest,
   type PingInstanceResult,
+  type ReportErrorPayload,
+  type RestoreDataRequest,
   type SaveConfigRequest,
   type SaveZoomFactorRequest,
   type SetupProgressEvent,
@@ -70,13 +80,26 @@ const desktopApi = {
   getDefaultInstallDir: (): Promise<string> => ipcRenderer.invoke(IpcChannels.getDefaultInstallDir),
   installRuntime: (installDir: string): Promise<void> =>
     ipcRenderer.invoke(IpcChannels.installRuntime, { installDir } satisfies InstallRuntimeRequest),
-  startLocalBackend: (installDir: string): Promise<void> =>
-    ipcRenderer.invoke(IpcChannels.startLocalBackend, { installDir } satisfies StartLocalBackendRequest),
+  startLocalBackend: (installDir: string, dataDir?: string | null): Promise<string | null> =>
+    ipcRenderer.invoke(IpcChannels.startLocalBackend, { installDir, dataDir } satisfies StartLocalBackendRequest),
   switchInstance: (instanceId: string): Promise<InitializeAppResult> =>
     ipcRenderer.invoke(IpcChannels.switchInstance, { instanceId } satisfies SwitchInstanceRequest),
   pingInstance: (instance: DesktopInstance): Promise<PingInstanceResult> =>
     ipcRenderer.invoke(IpcChannels.pingInstance, { instance } satisfies PingInstanceRequest),
   selectDirectory: (): Promise<string | null> => ipcRenderer.invoke(IpcChannels.selectDirectory),
+  selectSaveFile: (): Promise<string | null> => ipcRenderer.invoke(IpcChannels.selectSaveFile),
+  selectOpenFile: (): Promise<string | null> => ipcRenderer.invoke(IpcChannels.selectOpenFile),
+  getDefaultDataDir: (): Promise<string> => ipcRenderer.invoke(IpcChannels.getDefaultDataDir),
+  getDataInfo: (instanceId: string): Promise<DataInfo> =>
+    ipcRenderer.invoke(IpcChannels.getDataInfo, { instanceId } satisfies GetDataInfoRequest),
+  inspectDataDir: (dataDir: string): Promise<InspectDataDirResult> =>
+    ipcRenderer.invoke(IpcChannels.inspectDataDir, { dataDir } satisfies InspectDataDirRequest),
+  migrateData: (instanceId: string, newDataDir: string, deleteOldDir: boolean): Promise<MigrateDataResult> =>
+    ipcRenderer.invoke(IpcChannels.migrateData, { instanceId, newDataDir, deleteOldDir } satisfies MigrateDataRequest),
+  backupData: (instanceId: string, targetPath: string): Promise<void> =>
+    ipcRenderer.invoke(IpcChannels.backupData, { instanceId, targetPath } satisfies BackupDataRequest),
+  restoreData: (instanceId: string, sourcePath: string): Promise<void> =>
+    ipcRenderer.invoke(IpcChannels.restoreData, { instanceId, sourcePath } satisfies RestoreDataRequest),
   inspectLocalRuntime: (installDir: string): Promise<InspectLocalRuntimeResult> =>
     ipcRenderer.invoke(IpcChannels.inspectLocalRuntime, { installDir } satisfies InspectLocalRuntimeRequest),
   frontendHostPreloadPath: fileURLToPath(new URL("./frontend-host-preload.cjs", import.meta.url)),
@@ -96,6 +119,7 @@ const desktopApi = {
   exportLogs: (): Promise<string | null> => ipcRenderer.invoke(IpcChannels.exportLogs),
   logFrontendDiagnostic: (message: string): Promise<void> =>
     ipcRenderer.invoke(IpcChannels.logFrontendDiagnostic, { message } satisfies LogFrontendDiagnosticRequest),
+  reportError: (payload: ReportErrorPayload): void => ipcRenderer.send(IpcChannels.reportError, payload),
   openProjectHome: (): Promise<void> => ipcRenderer.invoke(IpcChannels.openProjectHome),
   reportBug: (): Promise<void> => ipcRenderer.invoke(IpcChannels.reportBug),
   suggestFeature: (): Promise<void> => ipcRenderer.invoke(IpcChannels.suggestFeature),
@@ -117,6 +141,11 @@ const desktopApi = {
     const listener = (_event: Electron.IpcRendererEvent, payload: SetupProgressEvent) => handler(payload);
     ipcRenderer.on(IpcChannels.setupProgress, listener);
     return () => ipcRenderer.off(IpcChannels.setupProgress, listener);
+  },
+  onDataProgress: (handler: (event: DataProgressEvent) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: DataProgressEvent) => handler(payload);
+    ipcRenderer.on(IpcChannels.dataProgress, listener);
+    return () => ipcRenderer.off(IpcChannels.dataProgress, listener);
   },
   onStartupProgress: (handler: (event: StartupProgressEvent) => void): (() => void) => {
     const listener = (_event: Electron.IpcRendererEvent, payload: StartupProgressEvent) => handler(payload);

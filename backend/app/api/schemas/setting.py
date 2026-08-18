@@ -38,8 +38,10 @@ class SettingsResponse(BaseModel):
 
     language: str = Field(default="zh-CN", description="语言")
     theme: str = Field(default="light", description="主题")
-    font_family: str = Field(default="SourceHanSerifCN-VF", description="字体")
-    code_font_family: str = Field(default="JetBrainsMapleMono", description="代码字体")
+    font_family: str = Field(default="system-ui", description="字体")
+    code_font_family: str = Field(default="ui-monospace", description="代码字体")
+    base_font_size: int = Field(default=14, description="基础字号（px）")
+    editor_font_size: int = Field(default=16, description="编辑器字号（px）")
     default_model: str = Field(default="", description="默认模型 ID")
     light_model: str = Field(default="", description="轻量模型 ID")
     default_embedding_model: str = Field(default="", description="默认 Embedding 模型 ID")
@@ -65,6 +67,26 @@ class SettingsResponse(BaseModel):
         default_factory=list, description="Agent 工具权限设置"
     )
     audit_persist_details: bool = Field(default=False, description="是否持久化 LLM 调用详情")
+    compress_system_prompts: bool = Field(
+        default=False,
+        description="是否将连续的 system 消息合并为一条",
+    )
+    telemetry_enabled: bool = Field(
+        default=True,
+        description="是否启用 PostHog 错误遥测",
+    )
+    editor_auto_indent: bool = Field(
+        default=True,
+        description="换行时若当前段落以两个全角空格开头，是否为下一段自动添加相同前缀",
+    )
+    editor_auto_convert_punctuation: bool = Field(
+        default=False,
+        description="输入半角标点符号时是否自动转换为全角",
+    )
+    editor_auto_pair_symbols: bool = Field(
+        default=False,
+        description="输入成对符号的左符号时是否自动补齐右符号",
+    )
 
 
 class SettingsUpdateRequest(BaseModel):
@@ -74,6 +96,8 @@ class SettingsUpdateRequest(BaseModel):
     theme: str | None = Field(default=None, description="主题")
     font_family: str | None = Field(default=None, description="字体")
     code_font_family: str | None = Field(default=None, description="代码字体")
+    base_font_size: int | None = Field(default=None, description="基础字号（px）")
+    editor_font_size: int | None = Field(default=None, description="编辑器字号（px）")
     default_model: str | None = Field(default=None, description="默认模型 ID")
     light_model: str | None = Field(default=None, description="轻量模型 ID")
     default_embedding_model: str | None = Field(
@@ -104,4 +128,24 @@ class SettingsUpdateRequest(BaseModel):
     )
     audit_persist_details: bool | None = Field(
         default=None, description="是否持久化 LLM 调用详情"
+    )
+    compress_system_prompts: bool | None = Field(
+        default=None,
+        description="是否将连续的 system 消息合并为一条",
+    )
+    telemetry_enabled: bool | None = Field(
+        default=None,
+        description="是否启用 PostHog 错误遥测",
+    )
+    editor_auto_indent: bool | None = Field(
+        default=None,
+        description="换行时若当前段落以两个全角空格开头，是否为下一段自动添加相同前缀",
+    )
+    editor_auto_convert_punctuation: bool | None = Field(
+        default=None,
+        description="输入半角标点符号时是否自动转换为全角",
+    )
+    editor_auto_pair_symbols: bool | None = Field(
+        default=None,
+        description="输入成对符号的左符号时是否自动补齐右符号",
     )

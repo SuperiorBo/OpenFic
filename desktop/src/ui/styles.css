@@ -1049,6 +1049,43 @@ h1 {
   border-radius: 4px;
 }
 
+.boot-warning {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid var(--amber-8, #d97706);
+  border-radius: 8px;
+  background: var(--amber-3, rgba(217, 119, 6, 0.08));
+}
+
+.boot-warning-text {
+  margin: 0;
+  color: var(--amber-11, #92400e);
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+.boot-confirm-button {
+  justify-self: center;
+  border: 0;
+  border-radius: 6px;
+  padding: 8px 24px;
+  background: var(--amber-9, #d97706);
+  color: #fff;
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.boot-confirm-button:hover {
+  background: var(--amber-10, #b45309);
+}
+
+.boot-confirm-button:focus-visible {
+  outline: 2px solid var(--amber-a8, rgba(217, 119, 6, 0.5));
+  outline-offset: 3px;
+}
+
 .startup-page {
   padding: 32px;
 }
@@ -1097,6 +1134,25 @@ h1 {
   border-radius: inherit;
   background: var(--accent-9);
   transition: width 220ms ease;
+}
+
+.startup-progress-track[data-indeterminate="true"] > span {
+  width: 35% !important;
+  animation: startup-progress-indeterminate 1.4s ease-in-out infinite;
+}
+
+@keyframes startup-progress-indeterminate {
+  0% {
+    transform: translateX(-120%);
+  }
+
+  50% {
+    transform: translateX(180%);
+  }
+
+  100% {
+    transform: translateX(300%);
+  }
 }
 
 .startup-progress[data-status="failed"] .startup-progress-track > span {
